@@ -1,6 +1,9 @@
 use anyhow::anyhow;
 use log::{debug, info};
-use ratatui::{layout::Rect, Frame};
+use ratatui::{
+  layout::{Rect, Size},
+  Frame,
+};
 use ratatui_image::{
   picker::{Picker, ProtocolType},
   protocol::StatefulProtocol,
@@ -134,8 +137,15 @@ impl CoverArt {
 
   fn size_for_state(state: &Mutex<Option<CoverArtState>>, area: Rect) -> Option<Rect> {
     let lock = state.lock().unwrap();
-    lock
-      .as_ref()
-      .map(|sp| sp.image.size_for(Resize::Fit(None), area))
+    lock.as_ref().map(|sp| {
+      let size = sp.image.size_for(
+        Resize::Fit(None),
+        Size {
+          width: area.width,
+          height: area.height,
+        },
+      );
+      Rect::new(0, 0, size.width, size.height)
+    })
   }
 }
