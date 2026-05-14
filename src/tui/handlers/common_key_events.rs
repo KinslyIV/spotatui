@@ -82,72 +82,30 @@ pub fn on_low_press_handler<T>(selection_data: &[T]) -> usize {
   selection_data.len().saturating_sub(1)
 }
 
+pub fn content_active_block_for_route(route_id: &RouteId) -> Option<ActiveBlock> {
+  match route_id {
+    RouteId::AlbumTracks => Some(ActiveBlock::AlbumTracks),
+    RouteId::TrackTable | RouteId::Recommendations => Some(ActiveBlock::TrackTable),
+    RouteId::Podcasts => Some(ActiveBlock::Podcasts),
+    RouteId::AlbumList => Some(ActiveBlock::AlbumList),
+    RouteId::PodcastEpisodes => Some(ActiveBlock::EpisodeTable),
+    RouteId::Discover => Some(ActiveBlock::Discover),
+    RouteId::Artists => Some(ActiveBlock::Artists),
+    RouteId::RecentlyPlayed => Some(ActiveBlock::RecentlyPlayed),
+    RouteId::Search => Some(ActiveBlock::SearchResultBlock),
+    RouteId::Artist => Some(ActiveBlock::ArtistBlock),
+    RouteId::Home => Some(ActiveBlock::Home),
+    _ => None,
+  }
+}
+
 pub fn handle_right_event(app: &mut App) {
   match app.get_current_route().hovered_block {
-    ActiveBlock::MyPlaylists | ActiveBlock::Library => match app.get_current_route().id {
-      RouteId::AlbumTracks => {
-        app.set_current_route_state(
-          Some(ActiveBlock::AlbumTracks),
-          Some(ActiveBlock::AlbumTracks),
-        );
+    ActiveBlock::MyPlaylists | ActiveBlock::Library => {
+      if let Some(active_block) = content_active_block_for_route(&app.get_current_route().id) {
+        app.set_current_route_state(Some(active_block), Some(active_block));
       }
-      RouteId::TrackTable => {
-        app.set_current_route_state(Some(ActiveBlock::TrackTable), Some(ActiveBlock::TrackTable));
-      }
-      RouteId::Podcasts => {
-        app.set_current_route_state(Some(ActiveBlock::Podcasts), Some(ActiveBlock::Podcasts));
-      }
-      RouteId::Recommendations => {
-        app.set_current_route_state(Some(ActiveBlock::TrackTable), Some(ActiveBlock::TrackTable));
-      }
-      RouteId::AlbumList => {
-        app.set_current_route_state(Some(ActiveBlock::AlbumList), Some(ActiveBlock::AlbumList));
-      }
-      RouteId::PodcastEpisodes => {
-        app.set_current_route_state(
-          Some(ActiveBlock::EpisodeTable),
-          Some(ActiveBlock::EpisodeTable),
-        );
-      }
-      RouteId::Discover => {
-        app.set_current_route_state(Some(ActiveBlock::Discover), Some(ActiveBlock::Discover));
-      }
-      RouteId::Artists => {
-        app.set_current_route_state(Some(ActiveBlock::Artists), Some(ActiveBlock::Artists));
-      }
-      RouteId::RecentlyPlayed => {
-        app.set_current_route_state(
-          Some(ActiveBlock::RecentlyPlayed),
-          Some(ActiveBlock::RecentlyPlayed),
-        );
-      }
-      RouteId::Search => {
-        app.set_current_route_state(
-          Some(ActiveBlock::SearchResultBlock),
-          Some(ActiveBlock::SearchResultBlock),
-        );
-      }
-      RouteId::Artist => app.set_current_route_state(
-        Some(ActiveBlock::ArtistBlock),
-        Some(ActiveBlock::ArtistBlock),
-      ),
-      RouteId::Home => {
-        app.set_current_route_state(Some(ActiveBlock::Home), Some(ActiveBlock::Home));
-      }
-      RouteId::SelectedDevice => {}
-      RouteId::Error => {}
-      RouteId::Analysis => {}
-      RouteId::LyricsView => {}
-      RouteId::CoverArtView => {}
-      RouteId::Dialog => {}
-      RouteId::AnnouncementPrompt => {}
-      RouteId::ExitPrompt => {}
-      RouteId::Settings => {}
-      RouteId::HelpMenu => {}
-      RouteId::Queue => {}
-      RouteId::Party => {}
-      RouteId::CreatePlaylist => {}
-    },
+    }
     _ => {}
   };
 }

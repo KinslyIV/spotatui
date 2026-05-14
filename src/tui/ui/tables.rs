@@ -788,7 +788,7 @@ fn draw_table(
   f.render_widget(table, layout_chunk);
 }
 
-fn table_scroll_offset(selected_index: usize, visible_rows: usize) -> usize {
+pub fn table_scroll_offset(selected_index: usize, visible_rows: usize) -> usize {
   if visible_rows == 0 {
     return 0;
   }

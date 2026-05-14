@@ -1,7 +1,4 @@
-use super::{
-  album_list, album_tracks, artists, episode_table, library, playbar, playlist, podcasts,
-  recently_played, settings, track_table,
-};
+use super::{common_key_events, library, playbar, playlist, settings, track_table};
 use crate::core::app::{
   ActiveBlock, App, RouteId, SettingValue, SettingsCategory, LIBRARY_OPTIONS,
 };
@@ -10,6 +7,7 @@ use crate::core::layout::{
 };
 use crate::tui::event::Key;
 use crate::tui::ui::player::playbar_control_at;
+use crate::tui::ui::tables::table_scroll_offset;
 use crate::tui::ui::util::{get_main_layout_margin, SMALL_TERMINAL_WIDTH};
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -154,31 +152,39 @@ fn handle_content_table_mouse(
   route_id: RouteId,
   app: &mut App,
 ) {
-  let Some(table) = ContentTable::for_route(route_id) else {
+  let Some(active_block) = common_key_events::content_active_block_for_route(&route_id) else {
     return;
   };
 
-  if table == ContentTable::TrackTable {
+  if active_block == ActiveBlock::TrackTable {
     handle_song_table_mouse(mouse, table_area, app);
     return;
   }
 
-  if content_table_item_count(table, app) == 0 {
+  if !matches!(
+    mouse.kind,
+    MouseEventKind::ScrollDown | MouseEventKind::ScrollUp | MouseEventKind::Down(MouseButton::Left)
+  ) {
+    return;
+  }
+
+  let item_count = content_table_item_count(active_block, app);
+  if item_count == 0 {
     return;
   }
 
   match mouse.kind {
     MouseEventKind::ScrollDown => {
-      focus_content_table(table, app);
-      handle_content_table_key(table, Key::Down, app);
+      focus_content_table(active_block, app);
+      super::handle_block_events(Key::Down, app);
     }
     MouseEventKind::ScrollUp => {
-      focus_content_table(table, app);
-      handle_content_table_key(table, Key::Up, app);
+      focus_content_table(active_block, app);
+      super::handle_block_events(Key::Up, app);
     }
     MouseEventKind::Down(MouseButton::Left) => {
-      focus_content_table(table, app);
-      select_clicked_content_table_item(table, mouse.row, table_area, app);
+      focus_content_table(active_block, app);
+      select_clicked_content_table_item(active_block, mouse.row, table_area, item_count, app);
     }
     _ => {}
   }
@@ -404,8 +410,7 @@ fn focus_song_table(app: &mut App) {
   app.set_current_route_state(Some(ActiveBlock::TrackTable), Some(ActiveBlock::TrackTable));
 }
 
-fn focus_content_table(table: ContentTable, app: &mut App) {
-  let active_block = table.active_block();
+fn focus_content_table(active_block: ActiveBlock, app: &mut App) {
   app.set_current_route_state(Some(active_block), Some(active_block));
 }
 
@@ -502,13 +507,14 @@ fn select_clicked_song(mouse_row: u16, table_area: Rect, app: &mut App) {
 }
 
 fn select_clicked_content_table_item(
-  table: ContentTable,
+  active_block: ActiveBlock,
   mouse_row: u16,
   table_area: Rect,
+  item_count: usize,
   app: &mut App,
 ) {
-  let item_count = content_table_item_count(table, app);
-  let selected_index = content_table_selected_index(table, app).min(item_count.saturating_sub(1));
+  let selected_index =
+    content_table_selected_index(active_block, app).min(item_count.saturating_sub(1));
 
   let Some(clicked_index) =
     table_item_index_from_click(table_area, mouse_row, selected_index, item_count)
@@ -516,61 +522,22 @@ fn select_clicked_content_table_item(
     return;
   };
 
-  let was_selected = content_table_selected_index(table, app) == clicked_index;
-  set_content_table_selected_index(table, clicked_index, app);
+  let was_selected = content_table_selected_index(active_block, app) == clicked_index;
+  set_content_table_selected_index(active_block, clicked_index, app);
   if was_selected {
-    handle_content_table_key(table, Key::Enter, app);
+    super::handle_block_events(Key::Enter, app);
   }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ContentTable {
-  TrackTable,
-  AlbumList,
-  AlbumTracks,
-  RecentlyPlayed,
-  Artists,
-  Podcasts,
-  EpisodeTable,
-}
-
-impl ContentTable {
-  fn for_route(route_id: RouteId) -> Option<Self> {
-    match route_id {
-      RouteId::TrackTable | RouteId::Recommendations => Some(Self::TrackTable),
-      RouteId::AlbumList => Some(Self::AlbumList),
-      RouteId::AlbumTracks => Some(Self::AlbumTracks),
-      RouteId::RecentlyPlayed => Some(Self::RecentlyPlayed),
-      RouteId::Artists => Some(Self::Artists),
-      RouteId::Podcasts => Some(Self::Podcasts),
-      RouteId::PodcastEpisodes => Some(Self::EpisodeTable),
-      _ => None,
-    }
-  }
-
-  fn active_block(self) -> ActiveBlock {
-    match self {
-      Self::TrackTable => ActiveBlock::TrackTable,
-      Self::AlbumList => ActiveBlock::AlbumList,
-      Self::AlbumTracks => ActiveBlock::AlbumTracks,
-      Self::RecentlyPlayed => ActiveBlock::RecentlyPlayed,
-      Self::Artists => ActiveBlock::Artists,
-      Self::Podcasts => ActiveBlock::Podcasts,
-      Self::EpisodeTable => ActiveBlock::EpisodeTable,
-    }
-  }
-}
-
-fn content_table_item_count(table: ContentTable, app: &App) -> usize {
-  match table {
-    ContentTable::TrackTable => app.track_table.tracks.len(),
-    ContentTable::AlbumList => app
+fn content_table_item_count(active_block: ActiveBlock, app: &App) -> usize {
+  match active_block {
+    ActiveBlock::AlbumList => app
       .library
       .saved_albums
       .get_results(None)
       .map(|albums| albums.items.len())
       .unwrap_or(0),
-    ContentTable::AlbumTracks => match app.album_table_context {
+    ActiveBlock::AlbumTracks => match app.album_table_context {
       crate::core::app::AlbumTableContext::Full => app
         .selected_album_full
         .as_ref()
@@ -582,38 +549,38 @@ fn content_table_item_count(table: ContentTable, app: &App) -> usize {
         .map(|album| album.tracks.items.len())
         .unwrap_or(0),
     },
-    ContentTable::RecentlyPlayed => app
+    ActiveBlock::RecentlyPlayed => app
       .recently_played
       .result
       .as_ref()
       .map(|recently_played| recently_played.items.len())
       .unwrap_or(0),
-    ContentTable::Artists => app
+    ActiveBlock::Artists => app
       .library
       .saved_artists
       .get_results(None)
       .map(|artists| artists.items.len())
       .unwrap_or(0),
-    ContentTable::Podcasts => app
+    ActiveBlock::Podcasts => app
       .library
       .saved_shows
       .get_results(None)
       .map(|shows| shows.items.len())
       .unwrap_or(0),
-    ContentTable::EpisodeTable => app
+    ActiveBlock::EpisodeTable => app
       .library
       .show_episodes
       .get_results(None)
       .map(|episodes| episodes.items.len())
       .unwrap_or(0),
+    _ => 0,
   }
 }
 
-fn content_table_selected_index(table: ContentTable, app: &App) -> usize {
-  match table {
-    ContentTable::TrackTable => app.track_table.selected_index,
-    ContentTable::AlbumList => app.album_list_index,
-    ContentTable::AlbumTracks => match app.album_table_context {
+fn content_table_selected_index(active_block: ActiveBlock, app: &App) -> usize {
+  match active_block {
+    ActiveBlock::AlbumList => app.album_list_index,
+    ActiveBlock::AlbumTracks => match app.album_table_context {
       crate::core::app::AlbumTableContext::Full => app.saved_album_tracks_index,
       crate::core::app::AlbumTableContext::Simplified => app
         .selected_album_simplified
@@ -621,18 +588,18 @@ fn content_table_selected_index(table: ContentTable, app: &App) -> usize {
         .map(|album| album.selected_index)
         .unwrap_or(0),
     },
-    ContentTable::RecentlyPlayed => app.recently_played.index,
-    ContentTable::Artists => app.artists_list_index,
-    ContentTable::Podcasts => app.shows_list_index,
-    ContentTable::EpisodeTable => app.episode_list_index,
+    ActiveBlock::RecentlyPlayed => app.recently_played.index,
+    ActiveBlock::Artists => app.artists_list_index,
+    ActiveBlock::Podcasts => app.shows_list_index,
+    ActiveBlock::EpisodeTable => app.episode_list_index,
+    _ => 0,
   }
 }
 
-fn set_content_table_selected_index(table: ContentTable, index: usize, app: &mut App) {
-  match table {
-    ContentTable::TrackTable => app.track_table.selected_index = index,
-    ContentTable::AlbumList => app.album_list_index = index,
-    ContentTable::AlbumTracks => match app.album_table_context {
+fn set_content_table_selected_index(active_block: ActiveBlock, index: usize, app: &mut App) {
+  match active_block {
+    ActiveBlock::AlbumList => app.album_list_index = index,
+    ActiveBlock::AlbumTracks => match app.album_table_context {
       crate::core::app::AlbumTableContext::Full => app.saved_album_tracks_index = index,
       crate::core::app::AlbumTableContext::Simplified => {
         if let Some(album) = &mut app.selected_album_simplified {
@@ -640,22 +607,11 @@ fn set_content_table_selected_index(table: ContentTable, index: usize, app: &mut
         }
       }
     },
-    ContentTable::RecentlyPlayed => app.recently_played.index = index,
-    ContentTable::Artists => app.artists_list_index = index,
-    ContentTable::Podcasts => app.shows_list_index = index,
-    ContentTable::EpisodeTable => app.episode_list_index = index,
-  }
-}
-
-fn handle_content_table_key(table: ContentTable, key: Key, app: &mut App) {
-  match table {
-    ContentTable::TrackTable => track_table::handler(key, app),
-    ContentTable::AlbumList => album_list::handler(key, app),
-    ContentTable::AlbumTracks => album_tracks::handler(key, app),
-    ContentTable::RecentlyPlayed => recently_played::handler(key, app),
-    ContentTable::Artists => artists::handler(key, app),
-    ContentTable::Podcasts => podcasts::handler(key, app),
-    ContentTable::EpisodeTable => episode_table::handler(key, app),
+    ActiveBlock::RecentlyPlayed => app.recently_played.index = index,
+    ActiveBlock::Artists => app.artists_list_index = index,
+    ActiveBlock::Podcasts => app.shows_list_index = index,
+    ActiveBlock::EpisodeTable => app.episode_list_index = index,
+    _ => {}
   }
 }
 
@@ -1022,18 +978,12 @@ fn rect_contains(rect: Rect, x: u16, y: u16) -> bool {
   x >= rect.x && x < right && y >= rect.y && y < bottom
 }
 
-fn table_scroll_offset(selected_index: usize, visible_rows: usize) -> usize {
-  if visible_rows == 0 {
-    return 0;
-  }
-
-  selected_index.saturating_sub(visible_rows.saturating_sub(1))
-}
-
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::core::app::{PlaylistFolderItem, RouteId, SettingValue, SettingsCategory};
+  use crate::core::app::{
+    AlbumTableContext, PlaylistFolderItem, RouteId, SelectedAlbum, SettingValue, SettingsCategory,
+  };
   use crate::tui::ui::player::PlaybarControl;
   use chrono::{Duration, Utc};
   use crossterm::event::{KeyModifiers, MouseEvent};
@@ -1726,6 +1676,87 @@ mod tests {
 
     let current_route = app.get_current_route();
     assert_eq!(current_route.active_block, ActiveBlock::AlbumList);
+  }
+
+  #[test]
+  fn content_table_selection_helpers_cover_supported_blocks() {
+    let mut app = App::default();
+    app.album_list_index = 2;
+    app.saved_album_tracks_index = 3;
+    app.recently_played.index = 4;
+    app.artists_list_index = 5;
+    app.shows_list_index = 6;
+    app.episode_list_index = 7;
+
+    assert_eq!(
+      content_table_selected_index(ActiveBlock::AlbumList, &app),
+      2
+    );
+    assert_eq!(
+      content_table_selected_index(ActiveBlock::AlbumTracks, &app),
+      3
+    );
+    assert_eq!(
+      content_table_selected_index(ActiveBlock::RecentlyPlayed, &app),
+      4
+    );
+    assert_eq!(content_table_selected_index(ActiveBlock::Artists, &app), 5);
+    assert_eq!(content_table_selected_index(ActiveBlock::Podcasts, &app), 6);
+    assert_eq!(
+      content_table_selected_index(ActiveBlock::EpisodeTable, &app),
+      7
+    );
+
+    set_content_table_selected_index(ActiveBlock::AlbumList, 8, &mut app);
+    set_content_table_selected_index(ActiveBlock::AlbumTracks, 9, &mut app);
+    set_content_table_selected_index(ActiveBlock::RecentlyPlayed, 10, &mut app);
+    set_content_table_selected_index(ActiveBlock::Artists, 11, &mut app);
+    set_content_table_selected_index(ActiveBlock::Podcasts, 12, &mut app);
+    set_content_table_selected_index(ActiveBlock::EpisodeTable, 13, &mut app);
+
+    assert_eq!(app.album_list_index, 8);
+    assert_eq!(app.saved_album_tracks_index, 9);
+    assert_eq!(app.recently_played.index, 10);
+    assert_eq!(app.artists_list_index, 11);
+    assert_eq!(app.shows_list_index, 12);
+    assert_eq!(app.episode_list_index, 13);
+  }
+
+  #[test]
+  fn content_table_selection_helpers_update_simplified_album_tracks() {
+    let mut app = App::default();
+    app.album_table_context = AlbumTableContext::Simplified;
+    app.selected_album_simplified = Some(SelectedAlbum {
+      album: SimplifiedAlbum {
+        name: "Album".to_string(),
+        ..Default::default()
+      },
+      tracks: Page {
+        href: "https://example.com/albums/1/tracks".to_string(),
+        items: Vec::<SimplifiedTrack>::new(),
+        limit: 0,
+        next: None,
+        offset: 0,
+        previous: None,
+        total: 0,
+      },
+      selected_index: 1,
+    });
+
+    assert_eq!(
+      content_table_selected_index(ActiveBlock::AlbumTracks, &app),
+      1
+    );
+
+    set_content_table_selected_index(ActiveBlock::AlbumTracks, 2, &mut app);
+
+    assert_eq!(
+      app
+        .selected_album_simplified
+        .as_ref()
+        .map(|album| album.selected_index),
+      Some(2)
+    );
   }
 
   #[test]
