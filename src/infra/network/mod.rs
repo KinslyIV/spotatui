@@ -108,17 +108,6 @@ pub enum IoEvent {
   FetchGlobalSongCount,
   FetchAnnouncements,
   GetLyrics(String, String, f64),
-  /// Pre-fetch the next saved tracks page in background for smoother page transitions
-  PreFetchSavedTracksPage {
-    offset: u32,
-    generation: u64,
-  },
-  /// Pre-fetch the next playlist page in background for smoother page transitions
-  PreFetchPlaylistTracksPage {
-    playlist_id: PlaylistId<'static>,
-    offset: u32,
-    generation: u64,
-  },
   /// Get user's top tracks for Discover feature (with time range)
   GetUserTopTracks(crate::core::app::DiscoverTimeRange),
   /// Get Top Artists Mix - fetches top artists and their top tracks
@@ -391,16 +380,6 @@ impl Network {
       }
       IoEvent::GetLyrics(track, artist, duration) => {
         self.get_lyrics(track, artist, duration).await;
-      }
-      IoEvent::PreFetchSavedTracksPage { offset, generation } => {
-        self.spawn_saved_tracks_prefetch(offset, generation);
-      }
-      IoEvent::PreFetchPlaylistTracksPage {
-        playlist_id,
-        offset,
-        generation,
-      } => {
-        self.spawn_playlist_tracks_prefetch(playlist_id, offset, generation);
       }
       IoEvent::GetUserTopTracks(time_range) => {
         self.get_user_top_tracks(time_range).await;

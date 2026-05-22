@@ -113,7 +113,8 @@ fn api_confirms_native_info_is_current(
 }
 
 #[cfg(feature = "streaming")]
-fn stale_api_item_should_preserve_native_context(
+#[derive(Clone, Copy, Debug)]
+struct StaleApiItemContext {
   native_info_present: bool,
   api_item_present: bool,
   api_confirms_native_info: bool,
@@ -122,11 +123,17 @@ fn stale_api_item_should_preserve_native_context(
   native_streaming_was_active: bool,
   native_activation_pending: bool,
   api_device_is_native: bool,
-) -> bool {
-  api_item_present
-    && !api_confirms_native_info
-    && (native_info_present || (native_track_id_present && !api_item_matches_native_track))
-    && (native_streaming_was_active || native_activation_pending || api_device_is_native)
+}
+
+#[cfg(feature = "streaming")]
+fn stale_api_item_should_preserve_native_context(context: StaleApiItemContext) -> bool {
+  context.api_item_present
+    && !context.api_confirms_native_info
+    && (context.native_info_present
+      || (context.native_track_id_present && !context.api_item_matches_native_track))
+    && (context.native_streaming_was_active
+      || context.native_activation_pending
+      || context.api_device_is_native)
 }
 
 /// Get the currently active streaming player, if any.
@@ -269,16 +276,17 @@ impl PlaybackNetwork for Network {
             )
           });
         #[cfg(feature = "streaming")]
-        let stale_api_item_for_native = stale_api_item_should_preserve_native_context(
-          app.native_track_info.is_some(),
-          c.item.is_some(),
-          api_item_confirms_native_info,
-          native_track_id_present,
-          api_item_matches_native_track,
-          native_streaming_was_active,
-          native_activation_was_pending,
-          is_native_device,
-        );
+        let stale_api_item_for_native =
+          stale_api_item_should_preserve_native_context(StaleApiItemContext {
+            native_info_present: app.native_track_info.is_some(),
+            api_item_present: c.item.is_some(),
+            api_confirms_native_info: api_item_confirms_native_info,
+            native_track_id_present,
+            api_item_matches_native_track,
+            native_streaming_was_active,
+            native_activation_pending: native_activation_was_pending,
+            api_device_is_native: is_native_device,
+          });
         #[cfg(not(feature = "streaming"))]
         let stale_api_item_for_native =
           app.native_track_info.is_some() && c.item.is_some() && !api_item_confirms_native_info;
@@ -1211,7 +1219,16 @@ mod tests {
   #[test]
   fn stale_api_item_keeps_native_metadata_when_native_was_active() {
     assert!(stale_api_item_should_preserve_native_context(
-      true, true, false, true, false, true, false, false,
+      StaleApiItemContext {
+        native_info_present: true,
+        api_item_present: true,
+        api_confirms_native_info: false,
+        native_track_id_present: true,
+        api_item_matches_native_track: false,
+        native_streaming_was_active: true,
+        native_activation_pending: false,
+        api_device_is_native: false,
+      },
     ));
   }
 
@@ -1219,7 +1236,16 @@ mod tests {
   #[test]
   fn stale_api_item_keeps_native_metadata_during_activation() {
     assert!(stale_api_item_should_preserve_native_context(
-      true, true, false, true, false, false, true, false,
+      StaleApiItemContext {
+        native_info_present: true,
+        api_item_present: true,
+        api_confirms_native_info: false,
+        native_track_id_present: true,
+        api_item_matches_native_track: false,
+        native_streaming_was_active: false,
+        native_activation_pending: true,
+        api_device_is_native: false,
+      },
     ));
   }
 
@@ -1227,7 +1253,16 @@ mod tests {
   #[test]
   fn stale_api_item_keeps_native_context_before_native_metadata_arrives() {
     assert!(stale_api_item_should_preserve_native_context(
-      false, true, false, true, false, true, false, false,
+      StaleApiItemContext {
+        native_info_present: false,
+        api_item_present: true,
+        api_confirms_native_info: false,
+        native_track_id_present: true,
+        api_item_matches_native_track: false,
+        native_streaming_was_active: true,
+        native_activation_pending: false,
+        api_device_is_native: false,
+      },
     ));
   }
 
@@ -1235,7 +1270,16 @@ mod tests {
   #[test]
   fn stale_native_metadata_clears_after_playback_leaves_native_device() {
     assert!(!stale_api_item_should_preserve_native_context(
-      true, true, false, true, false, false, false, false,
+      StaleApiItemContext {
+        native_info_present: true,
+        api_item_present: true,
+        api_confirms_native_info: false,
+        native_track_id_present: true,
+        api_item_matches_native_track: false,
+        native_streaming_was_active: false,
+        native_activation_pending: false,
+        api_device_is_native: false,
+      },
     ));
   }
 
@@ -1243,7 +1287,16 @@ mod tests {
   #[test]
   fn confirmed_api_item_no_longer_keeps_native_metadata() {
     assert!(!stale_api_item_should_preserve_native_context(
-      true, true, true, true, true, true, false, true,
+      StaleApiItemContext {
+        native_info_present: true,
+        api_item_present: true,
+        api_confirms_native_info: true,
+        native_track_id_present: true,
+        api_item_matches_native_track: true,
+        native_streaming_was_active: true,
+        native_activation_pending: false,
+        api_device_is_native: true,
+      },
     ));
   }
 
@@ -1251,7 +1304,16 @@ mod tests {
   #[test]
   fn matching_api_item_without_native_metadata_can_update_context() {
     assert!(!stale_api_item_should_preserve_native_context(
-      false, true, false, true, true, true, false, false,
+      StaleApiItemContext {
+        native_info_present: false,
+        api_item_present: true,
+        api_confirms_native_info: false,
+        native_track_id_present: true,
+        api_item_matches_native_track: true,
+        native_streaming_was_active: true,
+        native_activation_pending: false,
+        api_device_is_native: false,
+      },
     ));
   }
 
@@ -1259,7 +1321,16 @@ mod tests {
   #[test]
   fn api_item_without_native_track_id_can_update_context() {
     assert!(!stale_api_item_should_preserve_native_context(
-      false, true, false, false, false, true, false, false,
+      StaleApiItemContext {
+        native_info_present: false,
+        api_item_present: true,
+        api_confirms_native_info: false,
+        native_track_id_present: false,
+        api_item_matches_native_track: false,
+        native_streaming_was_active: true,
+        native_activation_pending: false,
+        api_device_is_native: false,
+      },
     ));
   }
 }

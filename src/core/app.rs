@@ -655,7 +655,6 @@ pub struct App {
   pub followed_artist_ids_set: HashSet<String>,
   pub saved_album_ids_set: HashSet<String>,
   pub saved_show_ids_set: HashSet<String>,
-  pub large_search_limit: u32,
   pub library: Library,
   pub playlist_offset: u32,
   pub playlist_tracks: Option<Page<PlaylistItem>>,
@@ -806,8 +805,10 @@ pub struct App {
   pub _playlist_refresh_generation: u64,
   /// Incremented every time the saved tracks view is reloaded to guard stale prefetch tasks
   pub saved_tracks_prefetch_generation: u64,
+  pub saved_tracks_prefetch_in_flight: HashSet<u32>,
   /// Incremented every time the playlist track table is reloaded to guard stale prefetch tasks
   pub playlist_tracks_prefetch_generation: u64,
+  pub playlist_tracks_prefetch_in_flight: HashSet<u32>,
   /// Tracks whether a ChangeVolume request is on its way to Spotify.
   /// When true, we hold off on sending another one — rapid key presses
   /// just update `pending_volume` and the latest value wins.
@@ -835,8 +836,7 @@ pub struct App {
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum PendingTrackSelection {
-  First,
-  Last,
+  Index(usize),
 }
 
 impl Default for App {
@@ -876,7 +876,6 @@ impl Default for App {
       saved_album_ids_set: HashSet::new(),
       saved_show_ids_set: HashSet::new(),
       navigation_stack: vec![DEFAULT_ROUTE],
-      large_search_limit: 20,
       small_search_limit: 4,
       api_error: String::new(),
       current_playback_context: None,
@@ -992,7 +991,9 @@ impl Default for App {
       current_playlist_folder_id: 0,
       _playlist_refresh_generation: 0,
       saved_tracks_prefetch_generation: 0,
+      saved_tracks_prefetch_in_flight: HashSet::new(),
       playlist_tracks_prefetch_generation: 0,
+      playlist_tracks_prefetch_in_flight: HashSet::new(),
       is_volume_change_in_flight: false,
       pending_volume: None,
       last_dispatched_volume: None,
@@ -2132,32 +2133,67 @@ impl App {
     }
   }
 
-  pub fn set_saved_tracks_to_table(&mut self, saved_track_page: &Page<SavedTrack>) {
-    self.replace_track_table_tracks(
-      saved_track_page
-        .items
-        .iter()
-        .map(|item| item.track.clone())
-        .collect::<Vec<FullTrack>>(),
-    );
-    self.track_table.context = Some(TrackTableContext::SavedTracks);
-  }
+  pub fn set_saved_tracks_to_table_continuous(&mut self) {
+    let mut tracks = Vec::new();
+    let mut expected_offset = 0;
+    let mut seen_offsets = HashSet::new();
+    let mut active_index = 0;
 
-  pub fn set_playlist_tracks_to_table(&mut self, playlist_track_page: &Page<PlaylistItem>) {
-    let mut tracks: Vec<FullTrack> = Vec::new();
-    let mut track_ids: Vec<TrackId<'static>> = Vec::new();
-    let mut positions: Vec<usize> = Vec::new();
+    for (page_index, page) in self.library.saved_tracks.pages.iter().enumerate() {
+      if page.offset != expected_offset || !seen_offsets.insert(page.offset) {
+        break;
+      }
 
-    for (idx, item) in playlist_track_page.items.iter().enumerate() {
-      if let Some(PlayableItem::Track(full_track)) = item.item.as_ref() {
-        tracks.push(full_track.clone());
-        if let Some(track_id) = full_track.id.as_ref() {
-          track_ids.push(track_id.clone().into_static());
-        }
-        positions.push(playlist_track_page.offset as usize + idx);
+      tracks.extend(page.items.iter().map(|item| item.track.clone()));
+      expected_offset = expected_offset.saturating_add(page.limit);
+      active_index = page_index;
+
+      if page.next.is_none() {
+        break;
       }
     }
 
+    self.library.saved_tracks.index = active_index;
+    self.replace_track_table_tracks(tracks);
+    self.track_table.context = Some(TrackTableContext::SavedTracks);
+  }
+
+  pub fn set_playlist_tracks_to_table_continuous(&mut self) {
+    let mut tracks: Vec<FullTrack> = Vec::new();
+    let mut track_ids: Vec<TrackId<'static>> = Vec::new();
+    let mut positions: Vec<usize> = Vec::new();
+    let mut expected_offset = 0;
+    let mut seen_offsets = HashSet::new();
+    let mut active_index = 0;
+    let mut active_page = None;
+
+    for (page_index, page) in self.playlist_track_pages.pages.iter().enumerate() {
+      if page.offset != expected_offset || !seen_offsets.insert(page.offset) {
+        break;
+      }
+
+      for (idx, item) in page.items.iter().enumerate() {
+        if let Some(PlayableItem::Track(full_track)) = item.item.as_ref() {
+          tracks.push(full_track.clone());
+          if let Some(track_id) = full_track.id.as_ref() {
+            track_ids.push(track_id.clone().into_static());
+          }
+          positions.push(page.offset as usize + idx);
+        }
+      }
+
+      expected_offset = expected_offset.saturating_add(page.limit);
+      active_index = page_index;
+      active_page = Some(page.clone());
+
+      if page.next.is_none() {
+        break;
+      }
+    }
+
+    self.playlist_track_pages.index = active_index;
+    self.playlist_tracks = active_page;
+    self.playlist_offset = 0;
     self.replace_track_table_tracks(tracks);
     self.playlist_track_positions = Some(positions);
     self.dispatch(IoEvent::CurrentUserSavedTracksContains(track_ids));
@@ -2165,6 +2201,7 @@ impl App {
 
   pub fn reset_saved_tracks_view(&mut self) {
     self.saved_tracks_prefetch_generation = self.saved_tracks_prefetch_generation.wrapping_add(1);
+    self.saved_tracks_prefetch_in_flight.clear();
     self.library.saved_tracks.clear();
     self.pending_track_table_selection = None;
     self.track_table.selected_index = 0;
@@ -2179,6 +2216,7 @@ impl App {
   ) {
     self.playlist_tracks_prefetch_generation =
       self.playlist_tracks_prefetch_generation.wrapping_add(1);
+    self.playlist_tracks_prefetch_in_flight.clear();
     self.playlist_track_table_id = Some(playlist_id);
     self.playlist_track_pages.clear();
     self.playlist_tracks = None;
@@ -2197,8 +2235,7 @@ impl App {
     if track_count > 0 {
       if let Some(pending) = self.pending_track_table_selection.take() {
         self.track_table.selected_index = match pending {
-          PendingTrackSelection::First => 0,
-          PendingTrackSelection::Last => track_count.saturating_sub(1),
+          PendingTrackSelection::Index(index) => index.min(track_count.saturating_sub(1)),
         };
       } else {
         let max_index = track_count.saturating_sub(1);
@@ -2233,11 +2270,13 @@ impl App {
       .playlist_tracks
       .as_ref()
       .map(|playlist_tracks| playlist_tracks.total)
-  }
-
-  pub fn current_playlist_track_page(&self) -> Option<&Page<PlaylistItem>> {
-    self.current_playlist_track_table_id()?;
-    self.playlist_tracks.as_ref()
+      .or_else(|| {
+        self
+          .playlist_track_pages
+          .pages
+          .first()
+          .map(|page| page.total)
+      })
   }
 
   pub fn is_playlist_track_table_active_for(&self, playlist_id: &PlaylistId<'_>) -> bool {
@@ -2250,41 +2289,6 @@ impl App {
   pub fn is_current_route_playlist_track_table_for(&self, playlist_id: &PlaylistId<'_>) -> bool {
     self.get_current_route().id == RouteId::TrackTable
       && self.is_playlist_track_table_active_for(playlist_id)
-  }
-
-  pub fn show_saved_tracks_page_at_index(&mut self, page_index: usize) {
-    let Some(saved_tracks_page) = self
-      .library
-      .saved_tracks
-      .get_results(Some(page_index))
-      .cloned()
-    else {
-      return;
-    };
-
-    self.library.saved_tracks.index = page_index;
-    self.set_saved_tracks_to_table(&saved_tracks_page);
-  }
-
-  pub fn show_playlist_tracks_page_at_index(&mut self, page_index: usize) {
-    let Some(playlist_tracks_page) = self
-      .playlist_track_pages
-      .get_results(Some(page_index))
-      .cloned()
-    else {
-      return;
-    };
-
-    self.playlist_track_pages.index = page_index;
-    self.playlist_offset = playlist_tracks_page.offset;
-    self.playlist_tracks = Some(playlist_tracks_page.clone());
-    self.set_playlist_tracks_to_table(&playlist_tracks_page);
-  }
-
-  pub fn show_playlist_tracks_page_at_offset(&mut self, offset: u32) -> Option<usize> {
-    let page_index = self.playlist_track_pages.page_index_for_offset(offset)?;
-    self.show_playlist_tracks_page_at_index(page_index);
-    Some(page_index)
   }
 
   pub fn next_missing_saved_tracks_offset(&self, page_index: usize) -> Option<u32> {
@@ -2300,6 +2304,15 @@ impl App {
       .then_some(next_offset)
   }
 
+  pub fn next_missing_saved_tracks_offset_continuous(&self) -> Option<u32> {
+    let saved_tracks_page = self
+      .library
+      .saved_tracks
+      .get_results(Some(self.library.saved_tracks.index))?;
+    saved_tracks_page.next.as_ref()?;
+    Some(saved_tracks_page.offset + saved_tracks_page.limit)
+  }
+
   pub fn next_missing_playlist_tracks_offset(&self, page_index: usize) -> Option<u32> {
     let playlist_tracks_page = self.playlist_track_pages.get_results(Some(page_index))?;
     playlist_tracks_page.next.as_ref()?;
@@ -2312,21 +2325,35 @@ impl App {
       .then_some(next_offset)
   }
 
-  pub fn dispatch_saved_tracks_prefetch(&mut self, offset: u32) {
-    self.dispatch(IoEvent::PreFetchSavedTracksPage {
-      offset,
-      generation: self.saved_tracks_prefetch_generation,
-    });
+  pub fn next_missing_playlist_tracks_offset_continuous(&self) -> Option<u32> {
+    let playlist_tracks_page = self
+      .playlist_track_pages
+      .get_results(Some(self.playlist_track_pages.index))?;
+    playlist_tracks_page.next.as_ref()?;
+    Some(playlist_tracks_page.offset + playlist_tracks_page.limit)
   }
 
-  pub fn dispatch_playlist_tracks_prefetch(&mut self, offset: u32) {
-    if let Some(playlist_id) = self.current_playlist_track_table_id() {
-      self.dispatch(IoEvent::PreFetchPlaylistTracksPage {
-        playlist_id,
-        offset,
-        generation: self.playlist_tracks_prefetch_generation,
-      });
-    }
+  pub fn current_playlist_has_more_tracks(&self) -> bool {
+    self
+      .playlist_tracks
+      .as_ref()
+      .is_some_and(|playlist_tracks| playlist_tracks.next.is_some())
+  }
+
+  pub fn current_saved_tracks_has_more_tracks(&self) -> bool {
+    self
+      .library
+      .saved_tracks
+      .get_results(Some(self.library.saved_tracks.index))
+      .is_some_and(|saved_tracks| saved_tracks.next.is_some())
+  }
+
+  pub fn selected_playlist_track_position(&self) -> Option<usize> {
+    self
+      .playlist_track_positions
+      .as_ref()
+      .and_then(|positions| positions.get(self.track_table.selected_index))
+      .copied()
   }
 
   pub fn set_saved_artists_to_table(&mut self, saved_artists_page: &CursorBasedPage<FullArtist>) {
@@ -2373,83 +2400,46 @@ impl App {
   }
 
   pub fn get_current_user_saved_tracks_next(&mut self) {
-    // Before fetching the next tracks, check if we have already fetched them
-    let next_index = self.library.saved_tracks.index + 1;
-    match self.library.saved_tracks.get_results(Some(next_index)) {
-      Some(_) => {
-        self.show_saved_tracks_page_at_index(next_index);
-        if let Some(offset) = self.next_missing_saved_tracks_offset(next_index) {
-          self.dispatch_saved_tracks_prefetch(offset);
-        }
-      }
-      None => {
-        if let Some(saved_tracks) = &self.library.saved_tracks.get_results(None) {
-          let offset = Some(saved_tracks.offset + saved_tracks.limit);
-          self.dispatch(IoEvent::GetCurrentSavedTracks(offset));
-        }
-      }
-    }
-  }
-
-  pub fn get_current_user_saved_tracks_previous(&mut self) {
-    if self.library.saved_tracks.index == 0 {
+    if !self.current_saved_tracks_has_more_tracks() {
       return;
     }
 
-    let previous_index = self.library.saved_tracks.index - 1;
-    self.show_saved_tracks_page_at_index(previous_index);
-    if let Some(offset) = self.next_missing_saved_tracks_offset(previous_index) {
-      self.dispatch_saved_tracks_prefetch(offset);
+    if let Some(next_offset) = self.next_missing_saved_tracks_offset_continuous() {
+      if self
+        .library
+        .saved_tracks
+        .page_index_for_offset(next_offset)
+        .is_some()
+      {
+        self.set_saved_tracks_to_table_continuous();
+      } else if !self.saved_tracks_prefetch_in_flight.contains(&next_offset) {
+        self.saved_tracks_prefetch_in_flight.insert(next_offset);
+        self.dispatch(IoEvent::GetCurrentSavedTracks(Some(next_offset)));
+      }
     }
   }
 
   pub fn get_playlist_tracks_next(&mut self) {
-    let Some(playlist_tracks) = self.current_playlist_track_page().cloned() else {
-      return;
-    };
     let Some(playlist_id) = self.current_playlist_track_table_id() else {
       return;
     };
-    let Some(next_offset) = playlist_tracks
-      .next
-      .as_ref()
-      .map(|_| playlist_tracks.offset + playlist_tracks.limit)
-    else {
+    if !self.current_playlist_has_more_tracks() {
       return;
-    };
+    }
 
-    match self.show_playlist_tracks_page_at_offset(next_offset) {
-      Some(page_index) => {
-        if let Some(offset) = self.next_missing_playlist_tracks_offset(page_index) {
-          self.dispatch_playlist_tracks_prefetch(offset);
-        }
-      }
-      None => {
+    if let Some(next_offset) = self.next_missing_playlist_tracks_offset_continuous() {
+      if self
+        .playlist_track_pages
+        .page_index_for_offset(next_offset)
+        .is_some()
+      {
+        self.set_playlist_tracks_to_table_continuous();
+      } else if !self
+        .playlist_tracks_prefetch_in_flight
+        .contains(&next_offset)
+      {
+        self.playlist_tracks_prefetch_in_flight.insert(next_offset);
         self.dispatch(IoEvent::GetPlaylistItems(playlist_id, next_offset));
-      }
-    }
-  }
-
-  pub fn get_playlist_tracks_previous(&mut self) {
-    let Some(playlist_tracks) = self.current_playlist_track_page().cloned() else {
-      return;
-    };
-    let Some(playlist_id) = self.current_playlist_track_table_id() else {
-      return;
-    };
-    if playlist_tracks.offset == 0 {
-      return;
-    }
-
-    let previous_offset = playlist_tracks.offset.saturating_sub(playlist_tracks.limit);
-    match self.show_playlist_tracks_page_at_offset(previous_offset) {
-      Some(page_index) => {
-        if let Some(offset) = self.next_missing_playlist_tracks_offset(page_index) {
-          self.dispatch_playlist_tracks_prefetch(offset);
-        }
-      }
-      None => {
-        self.dispatch(IoEvent::GetPlaylistItems(playlist_id, previous_offset));
       }
     }
   }
@@ -3968,6 +3958,32 @@ mod tests {
     }
   }
 
+  #[allow(deprecated)]
+  fn playlist_page(offset: u32, total: u32, ids: &[&str], has_next: bool) -> Page<PlaylistItem> {
+    Page {
+      href: "https://example.com/playlists/test/items".to_string(),
+      items: ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| {
+          let track = PlayableItem::Track(full_track(id, &format!("Track {offset}-{index}")));
+          PlaylistItem {
+            added_at: Some(Utc::now()),
+            added_by: None,
+            is_local: false,
+            track: Some(track.clone()),
+            item: Some(track),
+          }
+        })
+        .collect(),
+      limit: ids.len() as u32,
+      next: has_next.then(|| "https://example.com/playlists/test/items?next".to_string()),
+      offset,
+      previous: None,
+      total,
+    }
+  }
+
   fn playlist_id(id: &str) -> PlaylistId<'static> {
     PlaylistId::from_id(id).unwrap().into_static()
   }
@@ -4141,34 +4157,6 @@ mod tests {
   }
 
   #[test]
-  fn playlist_previous_requests_adjacent_offset_when_cache_is_sparse() {
-    let (tx, rx) = channel();
-    let mut app = App::new(tx, UserConfig::new(), SystemTime::now());
-    let playlist_id = playlist_id("37i9dQZF1DX4WYpdgoIcn6");
-    let first_page = empty_playlist_page(0, 100, 20, true);
-    let last_page = empty_playlist_page(80, 100, 20, false);
-
-    app.track_table.context = Some(TrackTableContext::MyPlaylists);
-    app.playlist_track_table_id = Some(playlist_id.clone());
-    app.playlist_track_pages.upsert_page_by_offset(first_page);
-    app
-      .playlist_track_pages
-      .upsert_page_by_offset(last_page.clone());
-    app.playlist_tracks = Some(last_page);
-    app.playlist_offset = 80;
-
-    app.get_playlist_tracks_previous();
-
-    match rx.recv().unwrap() {
-      IoEvent::GetPlaylistItems(id, offset) => {
-        assert_eq!(id.id(), playlist_id.id());
-        assert_eq!(offset, 60);
-      }
-      _ => panic!("unexpected event"),
-    }
-  }
-
-  #[test]
   fn playlist_next_uses_cached_adjacent_page_before_fetching() {
     let (tx, rx) = channel();
     let mut app = App::new(tx, UserConfig::new(), SystemTime::now());
@@ -4189,7 +4177,7 @@ mod tests {
 
     app.get_playlist_tracks_next();
 
-    assert_eq!(app.playlist_offset, 20);
+    assert_eq!(app.playlist_offset, 0);
     assert_eq!(
       app.playlist_tracks.as_ref().map(|page| page.offset),
       Some(20)
@@ -4200,17 +4188,81 @@ mod tests {
       }
       _ => panic!("unexpected event"),
     }
+    assert!(rx.try_recv().is_err());
+  }
+
+  #[test]
+  fn playlist_continuous_table_stops_at_sparse_cache_gap() {
+    let (tx, rx) = channel();
+    let mut app = App::new(tx, UserConfig::new(), SystemTime::now());
+    let playlist_id = playlist_id("37i9dQZF1DX4WYpdgoIcn6");
+    let first_page = playlist_page(
+      0,
+      6,
+      &["0000000000000000000001", "0000000000000000000002"],
+      true,
+    );
+    let sparse_page = playlist_page(
+      4,
+      6,
+      &["0000000000000000000005", "0000000000000000000006"],
+      false,
+    );
+
+    app.track_table.context = Some(TrackTableContext::MyPlaylists);
+    app.playlist_track_table_id = Some(playlist_id);
+    app.playlist_track_pages.upsert_page_by_offset(first_page);
+    app.playlist_track_pages.upsert_page_by_offset(sparse_page);
+
+    app.set_playlist_tracks_to_table_continuous();
+
+    assert_eq!(app.track_table.tracks.len(), 2);
+    assert_eq!(app.playlist_track_positions, Some(vec![0, 1]));
     match rx.recv().unwrap() {
-      IoEvent::PreFetchPlaylistTracksPage {
-        playlist_id: id,
-        offset,
-        ..
-      } => {
-        assert_eq!(id.id(), playlist_id.id());
-        assert_eq!(offset, 40);
+      IoEvent::CurrentUserSavedTracksContains(track_ids) => {
+        assert_eq!(track_ids.len(), 2);
       }
       _ => panic!("unexpected event"),
     }
+  }
+
+  #[test]
+  fn playlist_next_cached_page_applies_pending_continuous_index() {
+    let (tx, _rx) = channel();
+    let mut app = App::new(tx, UserConfig::new(), SystemTime::now());
+    let playlist_id = playlist_id("37i9dQZF1DX4WYpdgoIcn6");
+    let first_page = playlist_page(
+      0,
+      4,
+      &["0000000000000000000001", "0000000000000000000002"],
+      true,
+    );
+    let second_page = playlist_page(
+      2,
+      4,
+      &["0000000000000000000003", "0000000000000000000004"],
+      false,
+    );
+
+    app.track_table.context = Some(TrackTableContext::MyPlaylists);
+    app.playlist_track_table_id = Some(playlist_id);
+    app
+      .playlist_track_pages
+      .upsert_page_by_offset(first_page.clone());
+    app.playlist_track_pages.upsert_page_by_offset(second_page);
+    app.playlist_tracks = Some(first_page);
+    app.track_table.tracks = vec![
+      full_track("0000000000000000000001", "Track 1"),
+      full_track("0000000000000000000002", "Track 2"),
+    ];
+    app.track_table.selected_index = 1;
+    app.pending_track_table_selection = Some(PendingTrackSelection::Index(2));
+
+    app.get_playlist_tracks_next();
+
+    assert_eq!(app.track_table.tracks.len(), 4);
+    assert_eq!(app.track_table.selected_index, 2);
+    assert_eq!(app.playlist_track_positions, Some(vec![0, 1, 2, 3]));
   }
 
   #[test]

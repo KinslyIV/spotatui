@@ -11,7 +11,6 @@ use rspotify::model::{
   PlayableId,
 };
 use rspotify::prelude::Id;
-use std::collections::HashSet;
 
 pub fn handler(key: Key, app: &mut App) {
   match key {
@@ -28,32 +27,25 @@ pub fn handler(key: Key, app: &mut App) {
       if current_index == tracks_len - 1 {
         match &app.track_table.context {
           Some(TrackTableContext::MyPlaylists) | Some(TrackTableContext::PlaylistSearch) => {
-            let has_next_page = app
-              .current_playlist_track_page()
-              .is_some_and(|playlist_tracks| {
-                playlist_tracks.offset + playlist_tracks.limit < playlist_tracks.total
-              });
-            if has_next_page {
-              app.pending_track_table_selection = Some(PendingTrackSelection::First);
+            if app.current_playlist_has_more_tracks() {
+              app.pending_track_table_selection = Some(PendingTrackSelection::Index(tracks_len));
               app.get_playlist_tracks_next();
               return;
             }
+            app.track_table.selected_index = 0;
+            return;
           }
           Some(TrackTableContext::DiscoverPlaylist) => {
             // Discover playlists don't support pagination
           }
           Some(TrackTableContext::SavedTracks) => {
-            // Check if there are more saved tracks to load
-            if let Some(saved_tracks) = app.library.saved_tracks.get_results(None) {
-              let current_offset = saved_tracks.offset;
-              let limit = saved_tracks.limit;
-              // If there are more tracks beyond current page
-              if current_offset + limit < saved_tracks.total {
-                app.pending_track_table_selection = Some(PendingTrackSelection::First);
-                app.get_current_user_saved_tracks_next();
-                return;
-              }
+            if app.current_saved_tracks_has_more_tracks() {
+              app.pending_track_table_selection = Some(PendingTrackSelection::Index(tracks_len));
+              app.get_current_user_saved_tracks_next();
+              return;
             }
+            app.track_table.selected_index = 0;
+            return;
           }
           _ => {}
         }
@@ -66,41 +58,8 @@ pub fn handler(key: Key, app: &mut App) {
       app.track_table.selected_index = next_index;
     }
     k if common_key_events::up_event(k) => {
-      let current_index = app.track_table.selected_index;
-
       if app.track_table.tracks.is_empty() {
         return;
-      }
-
-      // Check if we're at the first track and there are previous tracks to load
-      if current_index == 0 {
-        match &app.track_table.context {
-          Some(TrackTableContext::MyPlaylists) | Some(TrackTableContext::PlaylistSearch) => {
-            if app
-              .current_playlist_track_page()
-              .is_some_and(|playlist_tracks| playlist_tracks.offset > 0)
-            {
-              app.pending_track_table_selection = Some(PendingTrackSelection::Last);
-              app.get_playlist_tracks_previous();
-              return;
-            }
-            return;
-          }
-          Some(TrackTableContext::DiscoverPlaylist) => {
-            // Discover playlists don't support pagination
-          }
-          Some(TrackTableContext::SavedTracks) => {
-            // Check if there are previous saved tracks to load
-            if app.library.saved_tracks.index > 0 {
-              // Set pending selection to move to last track when previous page loads
-              app.pending_track_table_selection = Some(PendingTrackSelection::Last);
-              app.get_current_user_saved_tracks_previous();
-              return;
-            }
-            return;
-          }
-          _ => {}
-        }
       }
 
       let next_index = common_key_events::on_up_press_handler(
@@ -129,12 +88,7 @@ pub fn handler(key: Key, app: &mut App) {
       if let Some(context) = &app.track_table.context {
         match context {
           TrackTableContext::MyPlaylists | TrackTableContext::PlaylistSearch => {
-            if app
-              .current_playlist_track_page()
-              .is_some_and(|playlist_tracks| {
-                playlist_tracks.offset + playlist_tracks.limit < playlist_tracks.total
-              })
-            {
+            if app.current_playlist_has_more_tracks() {
               app.get_playlist_tracks_next();
             }
           }
@@ -152,11 +106,11 @@ pub fn handler(key: Key, app: &mut App) {
       if let Some(context) = &app.track_table.context {
         match context {
           TrackTableContext::MyPlaylists | TrackTableContext::PlaylistSearch => {
-            app.get_playlist_tracks_previous();
+            app.track_table.selected_index = 0;
           }
           TrackTableContext::RecommendedTracks => {}
           TrackTableContext::SavedTracks => {
-            app.get_current_user_saved_tracks_previous();
+            app.track_table.selected_index = 0;
           }
           TrackTableContext::AlbumSearch => {}
           TrackTableContext::DiscoverPlaylist => {}
@@ -263,20 +217,19 @@ fn play_random_song(app: &mut App) {
       }
       TrackTableContext::RecommendedTracks => {}
       TrackTableContext::SavedTracks => {
-        if let Some(saved_tracks) = &app.library.saved_tracks.get_results(None) {
-          let playable_ids: Vec<PlayableId<'static>> = saved_tracks
-            .items
-            .iter()
-            .filter_map(|item| track_playable_id(item.track.id.clone()))
-            .collect();
-          if !playable_ids.is_empty() {
-            let rand_idx = thread_rng().gen_range(0..playable_ids.len());
-            app.dispatch(IoEvent::StartPlayback(
-              None,
-              Some(playable_ids),
-              Some(rand_idx),
-            ))
-          }
+        let playable_ids: Vec<PlayableId<'static>> = app
+          .track_table
+          .tracks
+          .iter()
+          .filter_map(|track| track_playable_id(track.id.clone()))
+          .collect();
+        if !playable_ids.is_empty() {
+          let rand_idx = thread_rng().gen_range(0..playable_ids.len());
+          app.dispatch(IoEvent::StartPlayback(
+            None,
+            Some(playable_ids),
+            Some(rand_idx),
+          ))
         }
       }
       TrackTableContext::AlbumSearch => {}
@@ -324,33 +277,8 @@ fn handle_recommended_tracks(app: &mut App) {
 }
 
 fn jump_to_end(app: &mut App) {
-  if let Some(context) = &app.track_table.context {
-    match context {
-      TrackTableContext::MyPlaylists | TrackTableContext::PlaylistSearch => {
-        if let (Some(total_tracks), Some(playlist_id)) = (
-          current_playlist_total_tracks(app),
-          current_playlist_id_static(app),
-        ) {
-          if total_tracks > 0 {
-            let last_page_offset =
-              ((total_tracks - 1) / app.large_search_limit) * app.large_search_limit;
-            if let Some(cached_index) = app
-              .playlist_track_pages
-              .page_index_for_offset(last_page_offset)
-            {
-              app.show_playlist_tracks_page_at_index(cached_index);
-              return;
-            }
-
-            app.dispatch(IoEvent::GetPlaylistItems(playlist_id, last_page_offset));
-          }
-        }
-      }
-      TrackTableContext::RecommendedTracks => {}
-      TrackTableContext::SavedTracks => {}
-      TrackTableContext::AlbumSearch => {}
-      TrackTableContext::DiscoverPlaylist => {}
-    }
+  if !app.track_table.tracks.is_empty() {
+    app.track_table.selected_index = app.track_table.tracks.len() - 1;
   }
 }
 
@@ -381,7 +309,7 @@ fn on_enter(app: &mut App) {
             app.dispatch(IoEvent::StartPlayback(
               context_id,
               None,
-              Some(app.track_table.selected_index + app.playlist_offset as usize),
+              app.selected_playlist_track_position(),
             ));
           }
         };
@@ -466,11 +394,9 @@ fn on_queue(app: &mut App) {
         }
       }
       TrackTableContext::SavedTracks => {
-        if let Some(page) = app.library.saved_tracks.get_results(None) {
-          if let Some(saved_track) = page.items.get(app.track_table.selected_index) {
-            if let Some(playable_id) = track_playable_id(saved_track.track.id.clone()) {
-              app.dispatch(IoEvent::AddItemToQueue(playable_id));
-            }
+        if let Some(track) = tracks.get(*selected_index) {
+          if let Some(playable_id) = track_playable_id(track.id.clone()) {
+            app.dispatch(IoEvent::AddItemToQueue(playable_id));
           }
         }
       }
@@ -487,21 +413,7 @@ fn on_queue(app: &mut App) {
 }
 
 fn jump_to_start(app: &mut App) {
-  if let Some(context) = &app.track_table.context {
-    match context {
-      TrackTableContext::MyPlaylists | TrackTableContext::PlaylistSearch => {
-        if let Some(cached_index) = app.playlist_track_pages.page_index_for_offset(0) {
-          app.show_playlist_tracks_page_at_index(cached_index);
-        } else if let Some(playlist_id) = current_playlist_id_static(app) {
-          app.dispatch(IoEvent::GetPlaylistItems(playlist_id, 0));
-        }
-      }
-      TrackTableContext::RecommendedTracks => {}
-      TrackTableContext::SavedTracks => {}
-      TrackTableContext::AlbumSearch => {}
-      TrackTableContext::DiscoverPlaylist => {}
-    }
-  }
+  app.track_table.selected_index = 0;
 }
 
 fn current_playlist_id_static(app: &App) -> Option<PlaylistId<'static>> {
@@ -554,31 +466,15 @@ fn track_playable_id(id: Option<TrackId<'_>>) -> Option<PlayableId<'static>> {
 }
 
 fn saved_tracks_playback_request(app: &App) -> Option<(Vec<PlayableId<'static>>, usize)> {
-  let current_page = app.library.saved_tracks.get_results(None)?;
-  let selected_row_offset = current_page.offset as usize + app.track_table.selected_index;
-  let estimated_tracks = app
-    .library
-    .saved_tracks
-    .pages
-    .iter()
-    .map(|page| page.items.len())
-    .sum();
-  let mut playable_ids = Vec::with_capacity(estimated_tracks);
+  let mut playable_ids = Vec::with_capacity(app.track_table.tracks.len());
   let mut selected_playable_offset = None;
-  let mut seen_offsets = HashSet::new();
 
-  for page in &app.library.saved_tracks.pages {
-    if !seen_offsets.insert(page.offset) {
-      continue;
-    }
-
-    for (item_index, item) in page.items.iter().enumerate() {
-      if let Some(playable_id) = track_playable_id(item.track.id.clone()) {
-        if page.offset as usize + item_index == selected_row_offset {
-          selected_playable_offset = Some(playable_ids.len());
-        }
-        playable_ids.push(playable_id);
+  for (row_index, track) in app.track_table.tracks.iter().enumerate() {
+    if let Some(playable_id) = track_playable_id(track.id.clone()) {
+      if row_index == app.track_table.selected_index {
+        selected_playable_offset = Some(playable_ids.len());
       }
+      playable_ids.push(playable_id);
     }
   }
 
@@ -603,6 +499,15 @@ mod tests {
   }
 
   fn saved_tracks_page(offset: u32, ids: &[&str], has_next: bool) -> Page<SavedTrack> {
+    saved_tracks_page_with_total(offset, ids, has_next, 4)
+  }
+
+  fn saved_tracks_page_with_total(
+    offset: u32,
+    ids: &[&str],
+    has_next: bool,
+    total: u32,
+  ) -> Page<SavedTrack> {
     Page {
       href: "https://example.com/me/tracks".to_string(),
       items: ids
@@ -614,7 +519,7 @@ mod tests {
       next: has_next.then(|| "https://example.com/me/tracks?next".to_string()),
       offset,
       previous: None,
-      total: 4,
+      total,
     }
   }
 
@@ -650,7 +555,7 @@ mod tests {
   }
 
   #[test]
-  fn saved_tracks_playback_request_uses_absolute_offset_on_later_pages() {
+  fn saved_tracks_playback_request_uses_continuous_row_selection() {
     let (mut app, _rx) = app_with_saved_tracks();
     let first_page = saved_tracks_page(
       0,
@@ -662,16 +567,20 @@ mod tests {
       &["0000000000000000000003", "0000000000000000000004"],
       false,
     );
-    app.library.saved_tracks.upsert_page_by_offset(first_page);
+    app
+      .library
+      .saved_tracks
+      .upsert_page_by_offset(first_page.clone());
     app
       .library
       .saved_tracks
       .upsert_page_by_offset(second_page.clone());
     app.library.saved_tracks.index = 1;
-    app.track_table.selected_index = 1;
-    app.track_table.tracks = second_page
+    app.track_table.selected_index = 3;
+    app.track_table.tracks = first_page
       .items
       .iter()
+      .chain(second_page.items.iter())
       .map(|item| item.track.clone())
       .collect();
 
@@ -680,6 +589,46 @@ mod tests {
     assert_eq!(offset, 3);
     assert_eq!(uris.len(), 4);
     assert_eq!(uris[offset].uri(), "spotify:track:0000000000000000000004");
+  }
+
+  #[test]
+  fn saved_tracks_queue_uses_continuous_row_selection() {
+    let (mut app, rx) = app_with_saved_tracks();
+    let first_page = saved_tracks_page(
+      0,
+      &["0000000000000000000001", "0000000000000000000002"],
+      true,
+    );
+    let second_page = saved_tracks_page(
+      2,
+      &["0000000000000000000003", "0000000000000000000004"],
+      false,
+    );
+    app
+      .library
+      .saved_tracks
+      .upsert_page_by_offset(first_page.clone());
+    app
+      .library
+      .saved_tracks
+      .upsert_page_by_offset(second_page.clone());
+    app.library.saved_tracks.index = 1;
+    app.track_table.selected_index = 3;
+    app.track_table.tracks = first_page
+      .items
+      .iter()
+      .chain(second_page.items.iter())
+      .map(|item| item.track.clone())
+      .collect();
+
+    on_queue(&mut app);
+
+    match rx.recv().unwrap() {
+      IoEvent::AddItemToQueue(playable_id) => {
+        assert_eq!(playable_id.uri(), "spotify:track:0000000000000000000004");
+      }
+      other => panic!("unexpected event: {:?}", event_name(&other)),
+    }
   }
 
   #[test]
@@ -718,7 +667,52 @@ mod tests {
   }
 
   #[test]
-  fn up_on_first_saved_tracks_row_without_previous_page_does_not_wrap() {
+  fn down_on_last_saved_track_loads_next_continuous_row() {
+    let (mut app, rx) = app_with_saved_tracks();
+    let page = saved_tracks_page(
+      0,
+      &["0000000000000000000001", "0000000000000000000002"],
+      true,
+    );
+    app.track_table.selected_index = 1;
+    app.track_table.tracks = page.items.iter().map(|item| item.track.clone()).collect();
+    app.library.saved_tracks.upsert_page_by_offset(page);
+    app.library.saved_tracks.index = 0;
+
+    handler(Key::Down, &mut app);
+
+    assert_eq!(
+      app.pending_track_table_selection,
+      Some(PendingTrackSelection::Index(2))
+    );
+    match rx.recv().unwrap() {
+      IoEvent::GetCurrentSavedTracks(Some(offset)) => assert_eq!(offset, 2),
+      other => panic!("unexpected event: {:?}", event_name(&other)),
+    }
+  }
+
+  #[test]
+  fn down_on_absolute_last_saved_track_wraps_to_start() {
+    let (mut app, rx) = app_with_saved_tracks();
+    let page = saved_tracks_page_with_total(
+      0,
+      &["0000000000000000000001", "0000000000000000000002"],
+      false,
+      2,
+    );
+    app.track_table.selected_index = 1;
+    app.track_table.tracks = page.items.iter().map(|item| item.track.clone()).collect();
+    app.library.saved_tracks.upsert_page_by_offset(page);
+    app.library.saved_tracks.index = 0;
+
+    handler(Key::Down, &mut app);
+
+    assert_eq!(app.track_table.selected_index, 0);
+    assert!(rx.try_recv().is_err());
+  }
+
+  #[test]
+  fn up_on_first_saved_tracks_row_wraps_to_last_loaded_track() {
     let (mut app, _rx) = app_with_saved_tracks();
     let page = saved_tracks_page(
       0,
@@ -732,11 +726,11 @@ mod tests {
 
     handler(Key::Up, &mut app);
 
-    assert_eq!(app.track_table.selected_index, 0);
+    assert_eq!(app.track_table.selected_index, 1);
   }
 
   #[test]
-  fn up_on_first_playlist_row_without_previous_page_does_not_wrap() {
+  fn up_on_first_playlist_row_wraps_to_last_loaded_track() {
     let (tx, _rx) = channel();
     let mut app = App::new(tx, UserConfig::new(), SystemTime::now());
     app.track_table.context = Some(TrackTableContext::MyPlaylists);
@@ -749,7 +743,7 @@ mod tests {
 
     handler(Key::Up, &mut app);
 
-    assert_eq!(app.track_table.selected_index, 0);
+    assert_eq!(app.track_table.selected_index, 1);
   }
 
   #[test]
