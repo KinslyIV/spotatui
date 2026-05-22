@@ -1,16 +1,21 @@
 use crate::core::config::{ClientConfig, ConfigPaths, NCSPOT_CLIENT_ID};
 use crate::infra::redirect_uri::redirect_uri_web_server;
 use anyhow::{anyhow, Result};
-use log::info;
+use log::{info, warn};
 use rspotify::{
   prelude::*,
-  {AuthCodePkceSpotify, Config, Credentials, OAuth, Token},
+  {AuthCodePkceSpotify, Config, Credentials, OAuth, Token, TokenCallback},
 };
 use std::{
   fs, io,
   path::{Path, PathBuf},
-  time::SystemTime,
+  sync::{Arc, OnceLock},
+  time::{Duration, SystemTime},
 };
+use tokio::sync::Mutex;
+
+pub const TOKEN_REFRESH_MARGIN: Duration = Duration::from_secs(60);
+static TOKEN_REFRESH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 const SCOPES: [&str; 16] = [
   "playlist-read-collaborative",
@@ -39,21 +44,38 @@ pub struct AuthenticatedClient {
 }
 
 // Manual token cache helpers since rspotify's built-in caching isn't working.
-pub async fn save_token_to_file(spotify: &AuthCodePkceSpotify, path: &PathBuf) -> Result<()> {
-  let mut token_lock = spotify.token.lock().await.expect("Failed to lock token");
-  if let Some(ref mut token) = *token_lock {
-    if token.refresh_token.is_none() && path.exists() {
-      if let Ok(old_json) = fs::read_to_string(path) {
-        if let Ok(old_token) = serde_json::from_str::<Token>(&old_json) {
-          token.refresh_token = old_token.refresh_token;
-        }
+fn preserve_refresh_token_from_file(token: &mut Token, path: &Path) {
+  if token.refresh_token.is_none() && path.exists() {
+    if let Ok(old_json) = fs::read_to_string(path) {
+      if let Ok(old_token) = serde_json::from_str::<Token>(&old_json) {
+        token.refresh_token = old_token.refresh_token;
       }
     }
-    let token_json = serde_json::to_string_pretty(token)?;
-    fs::write(path, token_json)?;
-    info!("token cached to {}", path.display());
+  }
+}
+
+fn persist_token_to_file(mut token: Token, path: &Path) -> Result<()> {
+  preserve_refresh_token_from_file(&mut token, path);
+  let token_json = serde_json::to_string_pretty(&token)?;
+  fs::write(path, token_json)?;
+  info!("token cached to {}", path.display());
+  Ok(())
+}
+
+pub async fn save_token_to_file(spotify: &AuthCodePkceSpotify, path: &Path) -> Result<()> {
+  let mut token_lock = spotify.token.lock().await.expect("Failed to lock token");
+  if let Some(ref mut token) = *token_lock {
+    preserve_refresh_token_from_file(token, path);
+    persist_token_to_file(token.clone(), path)?;
   }
   Ok(())
+}
+
+async fn restore_refresh_token_from_file(spotify: &AuthCodePkceSpotify, path: &Path) {
+  let mut token_lock = spotify.token.lock().await.expect("Failed to lock token");
+  if let Some(ref mut token) = *token_lock {
+    preserve_refresh_token_from_file(token, path);
+  }
 }
 
 pub async fn load_token_from_file(spotify: &AuthCodePkceSpotify, path: &PathBuf) -> Result<bool> {
@@ -110,11 +132,86 @@ fn build_pkce_spotify_client(
     scopes: SCOPES.iter().map(|s| s.to_string()).collect(),
     ..Default::default()
   };
+  let token_callback_path = cache_path.clone();
+  let token_callback = TokenCallback(Box::new(move |token| {
+    if let Err(e) = persist_token_to_file(token, &token_callback_path) {
+      warn!(
+        "failed to persist refreshed token to {}: {}",
+        token_callback_path.display(),
+        e
+      );
+    }
+    Ok(())
+  }));
   let config = Config {
     cache_path,
+    token_callback_fn: Arc::new(Some(token_callback)),
     ..Default::default()
   };
   AuthCodePkceSpotify::with_config(creds, oauth, config)
+}
+
+pub fn should_refresh_token_at(expiry: SystemTime, now: SystemTime) -> bool {
+  now
+    .checked_add(TOKEN_REFRESH_MARGIN)
+    .map(|refresh_deadline| refresh_deadline >= expiry)
+    .unwrap_or(true)
+}
+
+fn expiry_from_token(token: &Token) -> SystemTime {
+  if let Some(expires_at) = token.expires_at {
+    let unix_secs = expires_at.timestamp().max(0) as u64;
+    SystemTime::UNIX_EPOCH + Duration::from_secs(unix_secs)
+  } else {
+    let expires_in_secs = token.expires_in.num_seconds().max(0) as u64;
+    SystemTime::now()
+      .checked_add(Duration::from_secs(expires_in_secs))
+      .unwrap_or_else(SystemTime::now)
+  }
+}
+
+async fn token_state(spotify: &AuthCodePkceSpotify) -> Result<(SystemTime, bool)> {
+  let token_lock = spotify.token.lock().await.expect("Failed to lock token");
+  let token = token_lock
+    .as_ref()
+    .ok_or_else(|| anyhow!("Authentication failed: no valid token available"))?;
+
+  Ok((expiry_from_token(token), token.refresh_token.is_some()))
+}
+
+pub async fn token_needs_refresh(spotify: &AuthCodePkceSpotify) -> Result<bool> {
+  let (expiry, has_refresh_token) = token_state(spotify).await?;
+  Ok(has_refresh_token && should_refresh_token_at(expiry, SystemTime::now()))
+}
+
+pub async fn refresh_token_and_cache(
+  spotify: &AuthCodePkceSpotify,
+  token_cache_path: &Path,
+  force: bool,
+) -> Result<SystemTime> {
+  let refresh_lock = TOKEN_REFRESH_LOCK.get_or_init(|| Mutex::new(()));
+  let _guard = refresh_lock.lock().await;
+
+  restore_refresh_token_from_file(spotify, token_cache_path).await;
+  let (current_expiry, has_refresh_token) = token_state(spotify).await?;
+  if !force && !should_refresh_token_at(current_expiry, SystemTime::now()) {
+    return Ok(current_expiry);
+  }
+
+  if !has_refresh_token {
+    return Err(anyhow!(
+      "Authentication refresh failed: no refresh token available"
+    ));
+  }
+
+  spotify.refresh_token().await?;
+  restore_refresh_token_from_file(spotify, token_cache_path).await;
+  if spotify.config.token_callback_fn.as_ref().is_none() {
+    save_token_to_file(spotify, token_cache_path).await?;
+  }
+  let expiry = token_expiry(spotify).await?;
+  info!("refreshed token cached to {}", token_cache_path.display());
+  Ok(expiry)
 }
 
 async fn ensure_auth_token(
@@ -133,6 +230,25 @@ async fn ensure_auth_token(
       true
     }
   };
+
+  if !needs_auth && token_needs_refresh(spotify).await.unwrap_or(false) {
+    match refresh_token_and_cache(spotify, token_cache_path, false).await {
+      Ok(_) => {}
+      Err(e) => {
+        info!("cached authentication token refresh failed: {}", e);
+        if token_cache_path.exists() {
+          if let Err(remove_err) = fs::remove_file(token_cache_path) {
+            info!(
+              "failed to remove stale token cache {}: {}",
+              token_cache_path.display(),
+              remove_err
+            );
+          }
+        }
+        needs_auth = true;
+      }
+    }
+  }
 
   if !needs_auth {
     if let Err(e) = spotify.me().await {
@@ -286,15 +402,7 @@ pub async fn authenticate_with_fallback(
 pub async fn token_expiry(spotify: &AuthCodePkceSpotify) -> Result<SystemTime> {
   let token_lock = spotify.token.lock().await.expect("Failed to lock token");
   let token_expiry = if let Some(ref token) = *token_lock {
-    if let Some(expires_at) = token.expires_at {
-      let unix_secs = expires_at.timestamp().max(0) as u64;
-      SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(unix_secs)
-    } else {
-      let expires_in_secs = token.expires_in.num_seconds().max(0) as u64;
-      SystemTime::now()
-        .checked_add(std::time::Duration::from_secs(expires_in_secs))
-        .unwrap_or_else(SystemTime::now)
-    }
+    expiry_from_token(token)
   } else {
     return Err(anyhow!("Authentication failed: no valid token available"));
   };
@@ -495,6 +603,80 @@ mod tests {
       !should_refresh,
       "Valid non-expired token should not need refresh"
     );
+  }
+
+  #[test]
+  fn test_token_refresh_deadline_uses_safety_margin() {
+    let now = SystemTime::now();
+    let outside_margin = now + TOKEN_REFRESH_MARGIN + Duration::from_secs(30);
+    let inside_margin = now + TOKEN_REFRESH_MARGIN - Duration::from_secs(1);
+
+    assert!(!should_refresh_token_at(outside_margin, now));
+    assert!(should_refresh_token_at(inside_margin, now));
+  }
+
+  #[tokio::test]
+  async fn test_token_needs_refresh_inside_margin() {
+    let expiring_token = Token {
+      access_token: "expiring_access_token".to_string(),
+      refresh_token: Some("refresh_token".to_string()),
+      expires_in: TimeDelta::seconds(30),
+      expires_at: Some(Utc::now() + TimeDelta::seconds(30)),
+      scopes: Default::default(),
+    };
+
+    let spotify = create_test_spotify(expiring_token).await;
+
+    assert!(
+      token_needs_refresh(&spotify).await.unwrap(),
+      "Token inside the refresh margin should refresh before it expires"
+    );
+  }
+
+  #[test]
+  fn test_pkce_client_keeps_rspotify_auto_refresh_with_cache_callback() {
+    let spotify = build_pkce_spotify_client(
+      "test_client_id",
+      "http://localhost:8888/callback".to_string(),
+      create_temp_path(),
+    );
+
+    assert!(
+      spotify.config.token_refreshing,
+      "rspotify auto-refresh should remain available for direct client calls"
+    );
+    assert!(
+      spotify.config.token_callback_fn.as_ref().is_some(),
+      "rspotify-driven refreshes must still persist through spotatui's cache path"
+    );
+  }
+
+  #[test]
+  fn test_rspotify_token_callback_preserves_cached_refresh_token() {
+    let path = create_temp_path();
+    let old_token = create_test_token(Some("cached_refresh_token".to_string()));
+    fs::write(&path, serde_json::to_string_pretty(&old_token).unwrap()).unwrap();
+
+    let spotify = build_pkce_spotify_client(
+      "test_client_id",
+      "http://localhost:8888/callback".to_string(),
+      path.clone(),
+    );
+    let callback = spotify.config.token_callback_fn.as_ref().as_ref().unwrap();
+    let mut refreshed_token = create_test_token(None);
+    refreshed_token.access_token = "callback_access_token".to_string();
+
+    callback.0(refreshed_token).unwrap();
+
+    let saved_json = fs::read_to_string(&path).unwrap();
+    let saved_token: Token = serde_json::from_str(&saved_json).unwrap();
+    assert_eq!(saved_token.access_token, "callback_access_token");
+    assert_eq!(
+      saved_token.refresh_token,
+      Some("cached_refresh_token".to_string())
+    );
+
+    let _ = fs::remove_file(&path);
   }
 
   #[tokio::test]
