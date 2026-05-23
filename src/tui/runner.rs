@@ -32,6 +32,13 @@ use std::{
 };
 use tokio::sync::Mutex;
 
+const DEFAULT_WINDOW_TITLE: &str = "spt - spotatui";
+
+#[derive(Default)]
+struct WindowTitleState {
+  last_title: Option<String>,
+}
+
 #[cfg(feature = "discord-rpc")]
 pub type DiscordRpcHandle = Option<discord_rpc::DiscordRpcManager>;
 #[cfg(not(feature = "discord-rpc"))]
@@ -154,6 +161,119 @@ fn update_discord_presence(
         state.last_progress_ms = 0;
       }
     }
+  }
+}
+
+fn playback_window_title(app: &App) -> String {
+  let Some(snapshot) = crate::infra::media_metadata::current_playback_snapshot(app) else {
+    return DEFAULT_WINDOW_TITLE.to_string();
+  };
+
+  let title = sanitize_window_title_component(&snapshot.metadata.title);
+  let artist = sanitize_window_title_component(&snapshot.primary_artist());
+  if artist.trim().is_empty() {
+    title
+  } else {
+    format!("{} — {}", title, artist)
+  }
+}
+
+fn sanitize_window_title_component(value: &str) -> String {
+  value.chars().filter(|c| !c.is_control()).collect()
+}
+
+fn next_window_title(state: &mut WindowTitleState, app: &App) -> Option<String> {
+  if !app.user_config.behavior.set_window_title {
+    return state
+      .last_title
+      .take()
+      .map(|_| DEFAULT_WINDOW_TITLE.to_string());
+  }
+
+  let title = playback_window_title(app);
+  if state.last_title.as_ref() == Some(&title) {
+    None
+  } else {
+    state.last_title = Some(title.clone());
+    Some(title)
+  }
+}
+
+fn reset_window_title(state: &mut WindowTitleState) -> Result<()> {
+  if state
+    .last_title
+    .as_deref()
+    .is_some_and(|title| title != DEFAULT_WINDOW_TITLE)
+  {
+    execute!(stdout(), SetTitle(DEFAULT_WINDOW_TITLE))?;
+    state.last_title = None;
+  }
+  Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::core::app::NativeTrackInfo;
+  use std::{sync::mpsc::channel, time::SystemTime};
+
+  fn app() -> App {
+    let (tx, _rx) = channel();
+    App::new(
+      tx,
+      crate::core::user_config::UserConfig::new(),
+      SystemTime::now(),
+    )
+  }
+
+  #[test]
+  fn playback_window_title_uses_current_native_track() {
+    let mut app = app();
+    app.is_streaming_active = true;
+    app.native_track_info = Some(NativeTrackInfo {
+      name: "The Track".to_string(),
+      artists_display: "The Artist".to_string(),
+      album: "The Album".to_string(),
+      duration_ms: 180_000,
+    });
+
+    assert_eq!(playback_window_title(&app), "The Track — The Artist");
+  }
+
+  #[test]
+  fn playback_window_title_strips_control_characters() {
+    let mut app = app();
+    app.is_streaming_active = true;
+    app.native_track_info = Some(NativeTrackInfo {
+      name: "The\x1b]2;Bad\x07 Track".to_string(),
+      artists_display: "The\nArtist".to_string(),
+      album: "The Album".to_string(),
+      duration_ms: 180_000,
+    });
+
+    assert_eq!(playback_window_title(&app), "The]2;Bad Track — TheArtist");
+  }
+
+  #[test]
+  fn playback_window_title_falls_back_without_playback() {
+    let app = app();
+
+    assert_eq!(playback_window_title(&app), DEFAULT_WINDOW_TITLE);
+  }
+
+  #[test]
+  fn disabling_window_title_restores_default_once() {
+    let mut app = app();
+    let mut state = WindowTitleState {
+      last_title: Some("The Track — The Artist".to_string()),
+    };
+    app.user_config.behavior.set_window_title = false;
+
+    assert_eq!(
+      next_window_title(&mut state, &app).as_deref(),
+      Some(DEFAULT_WINDOW_TITLE)
+    );
+    assert_eq!(next_window_title(&mut state, &app), None);
   }
 }
 
@@ -284,10 +404,6 @@ pub async fn start_ui(
     app.terminal_input_caps.ctrl_punct_reliable = app::CapabilityState::Unknown;
   }
 
-  if user_config.behavior.set_window_title {
-    execute!(stdout(), SetTitle("spt - spotatui"))?;
-  }
-
   let events = event::Events::new(user_config.behavior.tick_rate_milliseconds);
 
   #[cfg(all(feature = "mpris", target_os = "linux"))]
@@ -302,11 +418,12 @@ pub async fn start_ui(
   #[cfg(all(feature = "mpris", target_os = "linux"))]
   let mut mpris_state = MprisState::default();
 
+  let mut window_title_state = WindowTitleState::default();
   let mut is_first_render = true;
 
   loop {
     let terminal_size = terminal.backend().size().ok();
-    {
+    let title_update = {
       let mut app = app.lock().await;
 
       #[cfg(all(feature = "mpris", target_os = "linux"))]
@@ -411,6 +528,10 @@ pub async fn start_ui(
         app.auth_refresh_in_progress = true;
         app.dispatch(IoEvent::RefreshAuthentication);
       }
+      next_window_title(&mut window_title_state, &app)
+    };
+    if let Some(title) = title_update {
+      execute!(stdout(), SetTitle(title.as_str()))?;
     }
 
     match events.next()? {
@@ -571,6 +692,7 @@ pub async fn start_ui(
   #[cfg(feature = "streaming")]
   pause_native_playback_before_exit(app).await;
 
+  reset_window_title(&mut window_title_state)?;
   execute!(stdout(), DisableMouseCapture)?;
   if keyboard_enhancement_enabled {
     let _ = execute!(stdout(), PopKeyboardEnhancementFlags);

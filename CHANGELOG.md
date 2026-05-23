@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Current track terminal title**: Updated the `Set Window Title` setting to show the currently playing track as `Track — Artist`, falling back to the default spotatui title when nothing is playing ([#262](https://github.com/LargeModGames/spotatui/issues/262)).
+
 ### Fixed
 
 - **Adaptive tick rates**: Split normal UI refreshes from animation-heavy refreshes so regular screens default to a lower CPU cadence while audio visualization stays smooth, and migrate legacy saved tick-rate defaults automatically ([#252](https://github.com/LargeModGames/spotatui/issues/252)).
