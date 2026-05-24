@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **Native streaming device handoff**: Kept native streaming recovery from stealing playback back after the user transfers listening from spotatui to another Spotify Connect device ([#254](https://github.com/LargeModGames/spotatui/issues/254)).
+
 ## [v0.38.3] - 2026-05-23
 
 ### Added

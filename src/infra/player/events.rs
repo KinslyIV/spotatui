@@ -449,6 +449,7 @@ async fn handle_player_events(
           &shared_position,
           &shared_is_playing,
           "Native streaming disconnected; attempting recovery.",
+          false,
         )
         .await
         {
@@ -466,6 +467,7 @@ async fn handle_player_events(
     &shared_position,
     &shared_is_playing,
     "Native streaming stopped; attempting recovery.",
+    true,
   )
   .await
   {
@@ -501,6 +503,7 @@ async fn disconnect_streaming_player(
   shared_position: &Arc<AtomicU64>,
   shared_is_playing: &Arc<AtomicBool>,
   status_message: &str,
+  allow_reselect_device: bool,
 ) -> Option<StreamingRecoveryRequest> {
   let mut app_lock = app.lock().await;
   let current_player = app_lock.streaming_player.as_ref()?;
@@ -508,7 +511,10 @@ async fn disconnect_streaming_player(
     return None;
   }
 
-  let reselect_device = current_playback_matches_native(&app_lock, player);
+  // Spotify Connect sends SessionDisconnected when the user intentionally moves
+  // playback to another device. At that point the API context can still be the
+  // old native device, so only reselect native for non-Connect-disconnect paths.
+  let reselect_device = allow_reselect_device && current_playback_matches_native(&app_lock, player);
 
   app_lock.streaming_player = None;
   app_lock.is_streaming_active = false;
