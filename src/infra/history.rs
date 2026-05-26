@@ -486,11 +486,7 @@ fn render_history_recap_html(period: RecapPeriod, listens: &[ListenRecord]) -> S
   let top_track_artist = if top_track_raw == "No data" {
     "No data".to_string()
   } else {
-    top_track_raw
-      .split(" - ")
-      .nth(1)
-      .unwrap_or("")
-      .to_string()
+    top_track_raw.split(" - ").nth(1).unwrap_or("").to_string()
   };
   let top_track_artist = escape_html(&top_track_artist);
 
@@ -1244,9 +1240,7 @@ fn aggregate_top_tracks(listens: &[ListenRecord]) -> Vec<RankedEntry> {
 }
 
 fn split_artists(combo: &str) -> Vec<String> {
-  let normalized = combo
-    .replace(" and ", ", ")
-    .replace(" & ", ", ");
+  let normalized = combo.replace(" and ", ", ").replace(" & ", ", ");
   normalized
     .split(',')
     .map(|s| s.trim().to_string())
@@ -1301,7 +1295,6 @@ fn aggregate_top_albums(listens: &[ListenRecord]) -> Vec<RankedEntry> {
       .collect(),
   )
 }
-
 
 fn aggregate_days(listens: &[ListenRecord]) -> Vec<RankedEntry> {
   let mut totals: BTreeMap<String, u64> = BTreeMap::new();
@@ -1383,11 +1376,7 @@ fn render_ranked_entries(entries: &[RankedEntry], empty_label: &str) -> String {
 }
 
 fn render_recent_entries(listens: &[ListenRecord]) -> String {
-  let recent_records = listens
-    .iter()
-    .rev()
-    .take(5)
-    .collect::<Vec<_>>();
+  let recent_records = listens.iter().rev().take(5).collect::<Vec<_>>();
 
   if recent_records.is_empty() {
     return r#"<p class="subtle">No recent plays.</p>"#.to_string();
@@ -1486,11 +1475,9 @@ pub async fn sync_history_to_cloud(sync_token: &str) -> Result<()> {
 
   use chrono::TimeZone;
   let last_synced_at = match fs::read_to_string(&path) {
-    Ok(content) => {
-      DateTime::parse_from_rfc3339(content.trim())
-        .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc.timestamp_opt(0, 0).unwrap())
-    }
+    Ok(content) => DateTime::parse_from_rfc3339(content.trim())
+      .map(|dt| dt.with_timezone(&Utc))
+      .unwrap_or_else(|_| Utc.timestamp_opt(0, 0).unwrap()),
     Err(_) => Utc.timestamp_opt(0, 0).unwrap(),
   };
 
@@ -1518,11 +1505,18 @@ pub async fn sync_history_to_cloud(sync_token: &str) -> Result<()> {
     if let Some(last_record) = new_listens.last() {
       fs::write(&path, last_record.ended_at.to_rfc3339())?;
     }
-    log::info!("successfully synchronized listening history to cloud ({} tracks)", new_listens.len());
+    log::info!(
+      "successfully synchronized listening history to cloud ({} tracks)",
+      new_listens.len()
+    );
   } else {
     let status = response.status();
     let err_body = response.text().await.unwrap_or_default();
-    log::warn!("failed to synchronize history: {} (status {})", err_body, status);
+    log::warn!(
+      "failed to synchronize history: {} (status {})",
+      err_body,
+      status
+    );
     return Err(anyhow!("Sync failed: {}", err_body));
   }
 
