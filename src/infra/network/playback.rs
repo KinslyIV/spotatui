@@ -225,6 +225,18 @@ async fn is_native_streaming_active_for_playback(network: &Network) -> bool {
     }
   }
 
+  // The user explicitly selected the native device very recently; honor that
+  // intent even when the API context hasn't caught up yet (the brief pre-poll
+  // window). `is_streaming_active` is re-derived from real Spotify state on the
+  // next poll, so this cannot reintroduce the #254 device hijack. (#282)
+  if app.is_streaming_active
+    && app
+      .last_device_activation
+      .is_some_and(|instant| instant.elapsed() < Duration::from_secs(5))
+  {
+    return true;
+  }
+
   // No match - not the active device
   false
 }
@@ -1076,6 +1088,11 @@ impl PlaybackNetwork for Network {
           app.is_streaming_active = true;
           app.native_activation_pending = true;
           app.native_playback_origin = None;
+          // Drop the stale previous-device context so playback routing follows the
+          // native intent (is_streaming_active) until the next poll repopulates it
+          // — mirrors the non-native transfer branch below. Without this, the first
+          // play can leak to the official Spotify client / 404 (#282).
+          app.current_playback_context = None;
           app.last_device_activation = Some(Instant::now());
           app.instant_since_last_current_playback_poll = Instant::now() - Duration::from_secs(6);
           return;

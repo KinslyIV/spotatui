@@ -197,6 +197,8 @@ spotatui can play audio directly without needing spotifyd or the official Spotif
 - Premium account required
 - Context-backed native playback prefers Spotify-visible playback starts when it is safe to do so, while raw URI-list playback stays on the stable direct native path
 
+> **Known limitation — `error audio key 0 1`:** Since late 2025, Spotify rejects librespot's audio-key requests for some accounts (more common on newer accounts), so native playback can't decrypt audio and fails. This is an upstream Spotify change that affects every librespot-based client (not just spotatui) and can't be fixed here. When it happens, spotatui shows a status-bar message — press `d` and pick an official Spotify Connect device (the desktop or mobile Spotify app) to keep listening. Accounts created before ~2020 are typically unaffected.
+
 See the [Native Streaming Wiki](https://github.com/LargeModGames/spotatui/wiki/Native-Streaming) for setup details.
 
 ## Configuration

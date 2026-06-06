@@ -174,6 +174,13 @@ async fn handle_player_events(
 ) {
   use chrono::TimeDelta;
 
+  // Count consecutive failed (Unavailable) loads so we can escalate the message
+  // when an account is hit by the upstream Spotify audio-key block (#282). A
+  // single genuinely-unavailable track only trips the mild message and resets on
+  // the next successful Playing.
+  let mut consecutive_unavailable: u32 = 0;
+  const UNAVAILABLE_ESCALATION_THRESHOLD: u32 = 3;
+
   while let Some(event) = event_rx.recv().await {
     if !is_current_streaming_player(&app, &player).await {
       continue;
@@ -185,6 +192,8 @@ async fn handle_player_events(
         track_id,
         position_ms,
       } => {
+        // Playback is actually working: reset the failure streak.
+        consecutive_unavailable = 0;
         shared_is_playing.store(true, Ordering::Relaxed);
 
         #[cfg(all(feature = "mpris", target_os = "linux"))]
@@ -461,6 +470,45 @@ async fn handle_player_events(
           let _ = recovery_tx.send(request);
         }
         return;
+      }
+      PlayerEvent::Unavailable { track_id, .. } => {
+        // librespot emits Unavailable when a track can't be loaded — including
+        // when Spotify rejects the audio key (`error audio key 0 1`), which makes
+        // decryption fail. This was previously dropped by the `_` arm, so the
+        // failure was completely silent (#282). Surface it to the user.
+        consecutive_unavailable += 1;
+
+        // Clear the ghost native track so the playbar doesn't show a track that
+        // never actually plays, mirroring the EndOfTrack/Stopped arms. Use
+        // try_lock to avoid stalling on the render loop; skipping a reset is fine.
+        if let Ok(mut app) = app.try_lock() {
+          app.song_progress_ms = 0;
+          app.native_track_info = None;
+          if let Some(ref mut ctx) = app.current_playback_context {
+            ctx.is_playing = false;
+          }
+        }
+
+        info!(
+          "native playback unavailable (track {}, consecutive {})",
+          track_id, consecutive_unavailable
+        );
+
+        // Emit on the threshold transitions only (== not >=) so we don't spam the
+        // same message on every auto-skip during an account-wide failure.
+        if consecutive_unavailable == 1 {
+          let mut app = app.lock().await;
+          app.set_status_message(
+            "Couldn't play this track natively (unavailable or blocked); skipping.",
+            6,
+          );
+        } else if consecutive_unavailable == UNAVAILABLE_ESCALATION_THRESHOLD {
+          let mut app = app.lock().await;
+          app.set_status_message(
+            "Native playback keeps failing — a known upstream Spotify limitation on some accounts that can't be fixed in spotatui. Press 'd' to switch to an official Spotify Connect device.",
+            20,
+          );
+        }
       }
       _ => {}
     }
