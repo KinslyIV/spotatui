@@ -1758,6 +1758,50 @@ impl App {
     self.queue_api_seek(new_progress);
   }
 
+  /// Seek to an absolute position within the current track (e.g. from clicking or
+  /// dragging on the playbar progress line). The target is clamped to the track
+  /// duration. Mirrors the dispatch logic of [`Self::seek_forwards`].
+  pub fn seek_to(&mut self, position_ms: u32) {
+    if let Some(CurrentPlaybackContext {
+      item: Some(item), ..
+    }) = &self.current_playback_context
+    {
+      let duration_ms = match item {
+        PlayableItem::Track(track) => track.duration.num_milliseconds() as u32,
+        PlayableItem::Episode(episode) => episode.duration.num_milliseconds() as u32,
+        _ => return,
+      };
+
+      let new_progress = position_ms.min(duration_ms);
+      self.seek_ms = Some(new_progress as u128);
+
+      // Use native streaming player for instant control (bypasses event channel latency)
+      #[cfg(feature = "streaming")]
+      if self.is_native_streaming_active_for_playback() && self.streaming_player.is_some() {
+        // Always update UI immediately
+        self.song_progress_ms = new_progress as u128;
+        self.seek_ms = None;
+
+        // Throttle actual seeks to avoid overwhelming librespot (max ~20/sec)
+        const SEEK_THROTTLE_MS: u128 = 50;
+        let should_seek_now = self
+          .last_native_seek
+          .is_none_or(|t| t.elapsed().as_millis() >= SEEK_THROTTLE_MS);
+
+        if should_seek_now {
+          self.execute_native_seek(new_progress);
+        } else {
+          // Queue the seek - will be flushed by tick loop or next seek
+          self.pending_native_seek = Some(new_progress);
+        }
+        return;
+      }
+
+      // Fallback: API-based seek for external devices (with throttling)
+      self.queue_api_seek(new_progress);
+    }
+  }
+
   /// Queue an API-based seek with throttling (for external device control)
   fn queue_api_seek(&mut self, position_ms: u32) {
     // Always update UI immediately

@@ -15,6 +15,7 @@ use ratatui::{
 use rspotify::model::enums::RepeatState;
 use rspotify::model::PlayableItem;
 use rspotify::prelude::Id;
+use unicode_width::UnicodeWidthStr;
 
 use super::util::{
   create_artist_string, display_track_progress, get_color, get_track_progress_percentage,
@@ -394,6 +395,95 @@ pub(crate) fn playbar_control_at(
   playbar_control_hitboxes(app, playbar_area)
     .into_iter()
     .find_map(|(control, rect)| rect.contains(Position { x, y }).then_some(control))
+}
+
+/// Geometry of the seekable region of the playbar progress line, used to translate
+/// a mouse column into an absolute playback position. Mirrors ratatui's `LineGauge`
+/// layout: the left-aligned label is drawn first, then the gauge line begins one
+/// column after it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PlaybarProgressLine {
+  /// Row the progress line is rendered on.
+  pub(crate) row: u16,
+  /// First column of the gauge line (the cell after the label + 1-column gap).
+  pub(crate) start: u16,
+  /// Number of cells in the gauge line.
+  pub(crate) width: u16,
+  /// Track duration the line represents, in milliseconds.
+  pub(crate) duration_ms: u32,
+}
+
+impl PlaybarProgressLine {
+  /// True when `(x, y)` lands on the seekable gauge line (excludes the time label).
+  pub(crate) fn contains(&self, x: u16, y: u16) -> bool {
+    y == self.row && x >= self.start && x < self.start + self.width
+  }
+
+  /// True when `y` is on the progress row, regardless of column (used for drags,
+  /// where the column is clamped into range rather than rejected).
+  pub(crate) fn on_row(&self, y: u16) -> bool {
+    y == self.row
+  }
+
+  /// Map a column to an absolute position in milliseconds, clamped to the line.
+  /// The far-right cell maps to just under the full duration so a click never
+  /// overshoots into the next track.
+  pub(crate) fn position_at(&self, x: u16) -> u32 {
+    let last = self.start + self.width.saturating_sub(1);
+    let offset = x.clamp(self.start, last) - self.start;
+    let fraction = f64::from(offset) / f64::from(self.width.max(1));
+    (f64::from(self.duration_ms) * fraction).round() as u32
+  }
+}
+
+/// Compute the seekable geometry of the playbar progress line for the current
+/// playback, or `None` when nothing is playing or the line is not rendered (e.g.
+/// the single-row playbar, or a terminal too narrow to fit the gauge).
+pub(crate) fn playbar_progress_line(app: &App, playbar_area: Rect) -> Option<PlaybarProgressLine> {
+  let item = app
+    .current_playback_context
+    .as_ref()
+    .and_then(|ctx| ctx.item.as_ref())?;
+
+  let progress_area = playbar_layout_areas(app, playbar_area).progress_area;
+  if progress_area.width == 0 || progress_area.height == 0 {
+    return None;
+  }
+
+  // Duration as shown on the playbar (native track info preferred). Mirrors
+  // draw_playbar's `display_duration_ms`, so keep the two in sync (player.rs ~761).
+  let duration_ms = if let Some(native_info) = &app.native_track_info {
+    native_info.duration_ms
+  } else {
+    match item {
+      PlayableItem::Track(track) => track.duration.num_milliseconds() as u32,
+      PlayableItem::Episode(episode) => episode.duration.num_milliseconds() as u32,
+      _ => return None,
+    }
+  };
+
+  // Recreate the gauge label exactly as draw_playbar does so the computed line
+  // `start` matches the rendered bar. The label reflects a pending seek if one is
+  // in flight (see player.rs ~805), otherwise the current progress.
+  let progress_ms = app.seek_ms.unwrap_or(app.song_progress_ms);
+  let duration_std = std::time::Duration::from_millis(u64::from(duration_ms));
+  let label = display_track_progress(progress_ms, duration_std);
+
+  // LineGauge writes the label (capped at the area width), then starts the line one
+  // column later: `start = label_end + 1` (see ratatui-widgets LineGauge::render).
+  let label_width = (UnicodeWidthStr::width(label.as_str()) as u16).min(progress_area.width);
+  let start = progress_area.x + label_width + 1;
+  let right = progress_area.x + progress_area.width;
+  if start >= right {
+    return None;
+  }
+
+  Some(PlaybarProgressLine {
+    row: progress_area.y,
+    start,
+    width: right - start,
+    duration_ms,
+  })
 }
 
 fn draw_playbar_controls(f: &mut Frame<'_>, app: &App, controls_area: Rect) {

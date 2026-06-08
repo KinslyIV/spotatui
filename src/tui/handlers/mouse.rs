@@ -7,7 +7,7 @@ use crate::core::layout::{
   sidebar_constraints,
 };
 use crate::tui::event::Key;
-use crate::tui::ui::player::playbar_control_at;
+use crate::tui::ui::player::{playbar_control_at, playbar_progress_line};
 use crate::tui::ui::tables::table_scroll_offset;
 use crate::tui::ui::util::{get_main_layout_margin, SMALL_TERMINAL_WIDTH};
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
@@ -227,16 +227,34 @@ fn handle_playbar_mouse(
   focus_block: ActiveBlock,
   app: &mut App,
 ) {
-  if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-    return;
+  match mouse.kind {
+    MouseEventKind::Down(MouseButton::Left) => {
+      // Control buttons take precedence; they sit on a different row than the gauge.
+      if let Some(control) = playbar_control_at(app, playbar_area, mouse.column, mouse.row) {
+        focus_playbar(focus_block, app);
+        playbar::handle_control(control, app);
+        return;
+      }
+
+      // Otherwise, a click on the progress line seeks to that position (#157).
+      if let Some(line) = playbar_progress_line(app, playbar_area) {
+        if line.contains(mouse.column, mouse.row) {
+          focus_playbar(focus_block, app);
+          app.seek_to(line.position_at(mouse.column));
+        }
+      }
+    }
+    // Dragging along the progress row scrubs; the column is clamped into the line.
+    MouseEventKind::Drag(MouseButton::Left) => {
+      if let Some(line) = playbar_progress_line(app, playbar_area) {
+        if line.on_row(mouse.row) {
+          focus_playbar(focus_block, app);
+          app.seek_to(line.position_at(mouse.column));
+        }
+      }
+    }
+    _ => {}
   }
-
-  let Some(control) = playbar_control_at(app, playbar_area, mouse.column, mouse.row) else {
-    return;
-  };
-
-  focus_playbar(focus_block, app);
-  playbar::handle_control(control, app);
 }
 
 fn handle_settings_screen_mouse(mouse: MouseEvent, app: &mut App) {
@@ -1263,6 +1281,145 @@ mod tests {
     let route = app.get_current_route();
     assert_eq!(route.active_block, ActiveBlock::PlayBar);
     assert_eq!(route.hovered_block, ActiveBlock::PlayBar);
+  }
+
+  #[test]
+  fn click_main_layout_playbar_progress_seeks() {
+    let mut app = App::default();
+    app.size = Size {
+      width: 160,
+      height: 50,
+    };
+    app.push_navigation_stack(RouteId::Home, ActiveBlock::Home);
+    with_playbar_context(&mut app); // 180_000 ms track
+    app.song_progress_ms = 0;
+
+    let areas = main_layout_areas(&app).expect("layout areas");
+    let line = playbar_progress_line(&app, areas.playbar).expect("progress line");
+
+    // A click a quarter of the way along the gauge seeks to ~25% of the track.
+    let quarter_x = line.start + line.width / 4;
+    handler(
+      mouse_event(MouseEventKind::Down(MouseButton::Left), quarter_x, line.row),
+      &mut app,
+    );
+    let after_quarter = app.song_progress_ms;
+    assert!(
+      (35_000..=60_000).contains(&after_quarter),
+      "quarter click gave {after_quarter}"
+    );
+
+    // A click three quarters along seeks further into the track.
+    let three_quarter_x = line.start + (line.width * 3) / 4;
+    handler(
+      mouse_event(
+        MouseEventKind::Down(MouseButton::Left),
+        three_quarter_x,
+        line.row,
+      ),
+      &mut app,
+    );
+    assert!(
+      (120_000..=150_000).contains(&app.song_progress_ms),
+      "three-quarter click gave {}",
+      app.song_progress_ms
+    );
+    assert!(app.song_progress_ms > after_quarter);
+
+    assert_eq!(app.get_current_route().active_block, ActiveBlock::PlayBar);
+  }
+
+  #[test]
+  fn click_playbar_time_label_does_not_seek() {
+    let mut app = App::default();
+    app.size = Size {
+      width: 160,
+      height: 50,
+    };
+    app.push_navigation_stack(RouteId::Home, ActiveBlock::Home);
+    with_playbar_context(&mut app);
+    app.song_progress_ms = 12_345;
+
+    let areas = main_layout_areas(&app).expect("layout areas");
+    let line = playbar_progress_line(&app, areas.playbar).expect("progress line");
+
+    // Clicking the time label (left of the gauge line) must not seek.
+    let label_x = line.start - 2;
+    handler(
+      mouse_event(MouseEventKind::Down(MouseButton::Left), label_x, line.row),
+      &mut app,
+    );
+    assert_eq!(app.song_progress_ms, 12_345);
+  }
+
+  #[test]
+  fn drag_playbar_progress_seeks() {
+    let mut app = App::default();
+    app.size = Size {
+      width: 160,
+      height: 50,
+    };
+    app.push_navigation_stack(RouteId::Home, ActiveBlock::Home);
+    with_playbar_context(&mut app);
+    app.song_progress_ms = 0;
+
+    let areas = main_layout_areas(&app).expect("layout areas");
+    let line = playbar_progress_line(&app, areas.playbar).expect("progress line");
+
+    let mid_x = line.start + line.width / 2;
+    handler(
+      mouse_event(MouseEventKind::Drag(MouseButton::Left), mid_x, line.row),
+      &mut app,
+    );
+    assert!(
+      (80_000..=100_000).contains(&app.song_progress_ms),
+      "drag to midpoint gave {}",
+      app.song_progress_ms
+    );
+  }
+
+  // Non-circular geometry check: the seek tests above derive their click column
+  // from `playbar_progress_line`, so a wrong `start`/`width` would cancel out. This
+  // renders the real playbar and asserts the computed line start matches the column
+  // where the actual gauge symbols begin in the rendered buffer.
+  #[test]
+  fn playbar_progress_line_start_matches_rendered_gauge() {
+    use crate::tui::ui::player::draw_playbar;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    let mut app = App::default();
+    app.size = Size {
+      width: 160,
+      height: 50,
+    };
+    app.push_navigation_stack(RouteId::Home, ActiveBlock::Home);
+    with_playbar_context(&mut app);
+    app.song_progress_ms = 60_000; // 1/3 of the 180s track -> a partly-filled gauge
+
+    let areas = main_layout_areas(&app).expect("layout areas");
+    let line = playbar_progress_line(&app, areas.playbar).expect("progress line");
+
+    let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
+    terminal
+      .draw(|f| draw_playbar(f, &app, areas.playbar))
+      .unwrap();
+    let buffer = terminal.backend().buffer();
+
+    // The LineGauge fills with "⣿" and "⣉"; neither appears in the time label, so the
+    // first such cell on the progress row is the true gauge start column.
+    let rendered_start = (areas.playbar.x..areas.playbar.x + areas.playbar.width)
+      .find(|&x| {
+        matches!(
+          buffer.cell((x, line.row)).map(|c| c.symbol()),
+          Some("⣿") | Some("⣉")
+        )
+      })
+      .expect("expected rendered gauge cells on the progress row");
+
+    assert_eq!(
+      rendered_start, line.start,
+      "computed gauge start must match the rendered bar"
+    );
   }
 
   #[test]
