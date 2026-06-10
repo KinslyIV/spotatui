@@ -138,6 +138,51 @@ enum NativePlaybackRoute {
   NativeLoad,
 }
 
+#[cfg(feature = "streaming")]
+#[derive(Clone, Copy, Debug, Default)]
+struct NativeActivationContext {
+  player_connected: bool,
+  current_device_id_present: bool,
+  current_device_is_confirmed_native: bool,
+  current_device_name_matches_native: bool,
+  native_has_fresh_activity: bool,
+  saved_device_matches_native: bool,
+  saved_external_confirmed_available: bool,
+}
+
+#[cfg(feature = "streaming")]
+fn should_activate_native_for_playback(context: NativeActivationContext) -> bool {
+  if !context.player_connected {
+    return false;
+  }
+
+  let current_device_is_stale_native_name =
+    context.current_device_name_matches_native && !context.native_has_fresh_activity;
+  let current_device_is_usable_external = context.current_device_id_present
+    && !context.current_device_is_confirmed_native
+    && !current_device_is_stale_native_name;
+
+  if current_device_is_usable_external {
+    return false;
+  }
+
+  if context.saved_device_matches_native {
+    return true;
+  }
+
+  !context.saved_external_confirmed_available
+}
+
+#[cfg(feature = "streaming")]
+fn is_no_active_device_error(e: &anyhow::Error) -> bool {
+  let text = e.to_string();
+  text.contains("NO_ACTIVE_DEVICE")
+    || text.contains("No active device")
+    || text.contains("no active device")
+    || text.contains("404")
+    || text.contains("Not Found")
+}
+
 fn api_confirms_native_info_is_current(
   native_name: &str,
   item: &PlayableItem,
@@ -252,29 +297,54 @@ async fn is_native_streaming_active_for_playback(network: &Network) -> bool {
 
 #[cfg(feature = "streaming")]
 async fn should_activate_native_streaming_for_playback(network: &Network) -> bool {
-  let saved_device_id = network.client_config.device_id.as_ref();
+  let saved_device_id = network.client_config.device_id.as_deref();
   let app = network.app.lock().await;
   let Some(player) = app.streaming_player.as_ref() else {
     return false;
   };
 
-  if !player.is_connected() || app.current_playback_context.is_some() {
+  if !player.is_connected() {
     return false;
   }
 
-  let Some(saved_device_id) = saved_device_id else {
-    return true;
-  };
+  let native_name = player.device_name();
+  let native_device_id = app.native_device_id.as_deref();
+  let current_device = app.current_playback_context.as_ref().map(|ctx| &ctx.device);
+  let current_device_id = current_device.and_then(|device| device.id.as_deref());
+  let current_device_name_matches_native =
+    current_device.is_some_and(|device| device.name.eq_ignore_ascii_case(native_name));
+  let native_has_fresh_activity = app.native_track_info.is_some()
+    || app.native_is_playing == Some(true)
+    || app
+      .last_device_activation
+      .is_some_and(|instant| instant.elapsed() < Duration::from_secs(5));
 
-  if app.native_device_id.as_ref() == Some(saved_device_id) {
-    return true;
-  }
+  let saved_device_matches_native = saved_device_id.is_some_and(|saved| {
+    native_device_id == Some(saved)
+      || app.devices.as_ref().is_some_and(|payload| {
+        payload.devices.iter().any(|device| {
+          device.id.as_deref() == Some(saved) && device.name.eq_ignore_ascii_case(native_name)
+        })
+      })
+  });
 
-  app.devices.as_ref().is_some_and(|payload| {
-    payload.devices.iter().any(|device| {
-      device.id.as_ref() == Some(saved_device_id)
-        && device.name.eq_ignore_ascii_case(player.device_name())
+  let saved_external_confirmed_available = saved_device_id.is_some_and(|saved| {
+    app.devices.as_ref().is_some_and(|payload| {
+      payload.devices.iter().any(|device| {
+        device.id.as_deref() == Some(saved) && !device.name.eq_ignore_ascii_case(native_name)
+      })
     })
+  });
+
+  should_activate_native_for_playback(NativeActivationContext {
+    player_connected: true,
+    current_device_id_present: current_device_id.is_some(),
+    current_device_is_confirmed_native: native_device_id
+      .is_some_and(|id| current_device_id == Some(id)),
+    current_device_name_matches_native,
+    native_has_fresh_activity,
+    saved_device_matches_native,
+    saved_external_confirmed_available,
   })
 }
 
@@ -328,6 +398,45 @@ async fn resolve_native_playback_route(
   match app.native_device_id.clone() {
     Some(device_id) => NativePlaybackRoute::ContextApi { device_id },
     None => NativePlaybackRoute::NativeLoad,
+  }
+}
+
+#[cfg(feature = "streaming")]
+fn native_load_request(
+  context_id: Option<PlayContextId<'static>>,
+  uris: Option<Vec<PlayableId<'static>>>,
+  offset: Option<usize>,
+) -> Option<LoadRequest> {
+  let mut options = LoadRequestOptions {
+    start_playing: true,
+    seek_to: 0,
+    context_options: None,
+    playing_track: None,
+  };
+
+  match (context_id, uris) {
+    (Some(context), Some(track_uris)) => {
+      if let Some(first_uri) = track_uris.first() {
+        options.playing_track = Some(PlayingTrack::Uri(first_uri.uri()));
+      } else if let Some(i) = offset.and_then(|i| u32::try_from(i).ok()) {
+        options.playing_track = Some(PlayingTrack::Index(i));
+      }
+      Some(LoadRequest::from_context_uri(context.uri(), options))
+    }
+    (Some(context), None) => {
+      if let Some(i) = offset.and_then(|i| u32::try_from(i).ok()) {
+        options.playing_track = Some(PlayingTrack::Index(i));
+      }
+      Some(LoadRequest::from_context_uri(context.uri(), options))
+    }
+    (None, Some(track_uris)) => {
+      if let Some(i) = offset.and_then(|i| u32::try_from(i).ok()) {
+        options.playing_track = Some(PlayingTrack::Index(i));
+      }
+      let uris = track_uris.into_iter().map(|u| u.uri()).collect::<Vec<_>>();
+      Some(LoadRequest::from_tracks(uris, options))
+    }
+    (None, None) => None,
   }
 }
 
@@ -713,12 +822,61 @@ impl PlaybackNetwork for Network {
 
         // For resume playback (no context, no uris)
         if context_id.is_none() && uris.is_none() {
-          info!("starting native resume playback via direct player route");
-          player.play();
-          // Update UI state immediately
-          let mut app = self.app.lock().await;
-          if let Some(ctx) = &mut app.current_playback_context {
-            ctx.is_playing = true;
+          let (can_resume_direct_native, native_device_id) = {
+            let app = self.app.lock().await;
+            (
+              app.native_track_info.is_some() || app.last_track_id.is_some(),
+              app
+                .native_device_id
+                .clone()
+                .or_else(|| Some(player.device_id())),
+            )
+          };
+
+          if can_resume_direct_native {
+            info!("starting native resume playback via direct player route");
+            player.play();
+            let mut app = self.app.lock().await;
+            if let Some(ctx) = &mut app.current_playback_context {
+              ctx.is_playing = true;
+            }
+          } else if let Some(device_id) = native_device_id {
+            info!(
+              "starting native resume playback via Spotify API on device {}",
+              device_id
+            );
+            match self
+              .spotify_api_request_json(
+                Method::PUT,
+                "me/player/play",
+                &[("device_id", device_id.clone())],
+                None,
+              )
+              .await
+            {
+              Ok(_) => {
+                let mut app = self.app.lock().await;
+                app.native_device_id = Some(device_id);
+                if let Some(ctx) = &mut app.current_playback_context {
+                  ctx.is_playing = true;
+                }
+                app.dispatch(IoEvent::GetCurrentPlayback);
+              }
+              Err(e) => {
+                let mut app = self.app.lock().await;
+                app.set_status_message(
+                  format!("No playback to resume on {}.", player.device_name()),
+                  4,
+                );
+                info!("native resume via Spotify API failed: {}", e);
+              }
+            }
+          } else {
+            let mut app = self.app.lock().await;
+            app.set_status_message(
+              format!("No playback to resume on {}.", player.device_name()),
+              4,
+            );
           }
           return;
         }
@@ -777,44 +935,8 @@ impl PlaybackNetwork for Network {
           }
         }
 
-        // For URI-based or context playback, use Spirc load directly.
-        let mut options = LoadRequestOptions {
-          start_playing: true,
-          seek_to: 0,
-          context_options: None,
-          playing_track: None,
-        };
-
-        let request = match (context_id, uris) {
-          (Some(context), Some(track_uris)) => {
-            if let Some(first_uri) = track_uris.first() {
-              options.playing_track = Some(PlayingTrack::Uri(first_uri.uri()));
-            } else if let Some(i) = offset.and_then(|i| u32::try_from(i).ok()) {
-              options.playing_track = Some(PlayingTrack::Index(i));
-            }
-            LoadRequest::from_context_uri(context.uri(), options)
-          }
-          (Some(context), None) => {
-            if let Some(i) = offset.and_then(|i| u32::try_from(i).ok()) {
-              options.playing_track = Some(PlayingTrack::Index(i));
-            }
-            LoadRequest::from_context_uri(context.uri(), options)
-          }
-          (None, Some(track_uris)) => {
-            if let Some(i) = offset.and_then(|i| u32::try_from(i).ok()) {
-              options.playing_track = Some(PlayingTrack::Index(i));
-            }
-            let uris = track_uris.into_iter().map(|u| u.uri()).collect::<Vec<_>>();
-            LoadRequest::from_tracks(uris, options)
-          }
-          (None, None) => {
-            player.play();
-            let mut app = self.app.lock().await;
-            if let Some(ctx) = &mut app.current_playback_context {
-              ctx.is_playing = true;
-            }
-            return;
-          }
+        let Some(request) = native_load_request(context_id, uris, offset) else {
+          return;
         };
 
         info!("starting native playback via direct load route");
@@ -863,8 +985,79 @@ impl PlaybackNetwork for Network {
         app.user_config.behavior.shuffle_enabled = desired_shuffle_state;
       }
       Err(e) => {
+        #[cfg(feature = "streaming")]
+        if is_no_active_device_error(&e) {
+          if let Some(player) = current_streaming_player(self).await {
+            if player.is_connected() {
+              let requested_origin =
+                requested_native_playback_origin(self, &context_id, &uris).await;
+              let activation_time = Instant::now();
+              let native_device_id = player.device_id();
+              player.activate();
+              {
+                let mut app = self.app.lock().await;
+                app.is_streaming_active = true;
+                app.native_activation_pending = false;
+                app.native_playback_origin = Some(requested_origin);
+                app.native_device_id = Some(native_device_id.clone());
+                app.last_device_activation = Some(activation_time);
+                app.instant_since_last_current_playback_poll =
+                  activation_time - Duration::from_secs(6);
+              }
+
+              if let Some(request) = native_load_request(context_id, uris, offset) {
+                info!("default Spotify playback had no active device; falling back to native load");
+                if let Err(load_err) = player.load(request) {
+                  let mut app = self.app.lock().await;
+                  app.handle_error(anyhow!("Failed to start native playback: {}", load_err));
+                } else {
+                  let _ = player.set_shuffle(desired_shuffle_state);
+                  let mut app = self.app.lock().await;
+                  if let Some(ctx) = &mut app.current_playback_context {
+                    ctx.is_playing = true;
+                    ctx.shuffle_state = desired_shuffle_state;
+                  }
+                  app.user_config.behavior.shuffle_enabled = desired_shuffle_state;
+                }
+                return;
+              }
+
+              info!(
+                "default Spotify resume had no active device; retrying on native device {}",
+                native_device_id
+              );
+              match self
+                .spotify_api_request_json(
+                  Method::PUT,
+                  "me/player/play",
+                  &[("device_id", native_device_id.clone())],
+                  None,
+                )
+                .await
+              {
+                Ok(_) => {
+                  let mut app = self.app.lock().await;
+                  if let Some(ctx) = &mut app.current_playback_context {
+                    ctx.is_playing = true;
+                  }
+                  app.dispatch(IoEvent::GetCurrentPlayback);
+                }
+                Err(resume_err) => {
+                  let mut app = self.app.lock().await;
+                  app.set_status_message(
+                    format!("No playback to resume on {}.", player.device_name()),
+                    4,
+                  );
+                  info!("native resume fallback failed: {}", resume_err);
+                }
+              }
+              return;
+            }
+          }
+        }
+
         let mut app = self.app.lock().await;
-        app.handle_error(anyhow!(e));
+        app.handle_error(e);
       }
     }
   }
@@ -1483,6 +1676,92 @@ mod tests {
       "New Native Song",
       &item,
       Some("0000000000000000000002")
+    ));
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn native_activation_uses_native_when_no_current_device_or_saved_device() {
+    assert!(should_activate_native_for_playback(
+      NativeActivationContext {
+        player_connected: true,
+        ..Default::default()
+      },
+    ));
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn native_activation_uses_native_when_saved_device_is_unavailable() {
+    assert!(should_activate_native_for_playback(
+      NativeActivationContext {
+        player_connected: true,
+        saved_external_confirmed_available: false,
+        ..Default::default()
+      },
+    ));
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn native_activation_keeps_confirmed_external_device() {
+    assert!(!should_activate_native_for_playback(
+      NativeActivationContext {
+        player_connected: true,
+        current_device_id_present: true,
+        ..Default::default()
+      },
+    ));
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn native_activation_keeps_confirmed_saved_external_device() {
+    assert!(!should_activate_native_for_playback(
+      NativeActivationContext {
+        player_connected: true,
+        saved_external_confirmed_available: true,
+        ..Default::default()
+      },
+    ));
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn native_activation_uses_native_for_saved_native_device() {
+    assert!(should_activate_native_for_playback(
+      NativeActivationContext {
+        player_connected: true,
+        saved_device_matches_native: true,
+        saved_external_confirmed_available: true,
+        ..Default::default()
+      },
+    ));
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn native_activation_uses_native_for_stale_native_name_match() {
+    assert!(should_activate_native_for_playback(
+      NativeActivationContext {
+        player_connected: true,
+        current_device_id_present: true,
+        current_device_name_matches_native: true,
+        native_has_fresh_activity: false,
+        ..Default::default()
+      },
+    ));
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn native_activation_ignores_disconnected_player() {
+    assert!(!should_activate_native_for_playback(
+      NativeActivationContext {
+        player_connected: false,
+        saved_device_matches_native: true,
+        ..Default::default()
+      },
     ));
   }
 
