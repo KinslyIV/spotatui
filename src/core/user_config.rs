@@ -84,7 +84,7 @@ pub fn format_update_delay_secs(secs: u64) -> String {
   }
 }
 
-fn default_app_config_dir() -> Option<PathBuf> {
+pub(crate) fn default_app_config_dir() -> Option<PathBuf> {
   dirs::home_dir().map(|home| home.join(CONFIG_DIR).join(APP_CONFIG_DIR))
 }
 

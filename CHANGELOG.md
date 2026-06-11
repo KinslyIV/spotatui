@@ -4,6 +4,7 @@
 
 ### Added
 
+- **Lua plugin scripting**: Added an embedded Lua engine behind the `scripting` feature that loads `~/.config/spotatui/init.lua` and `~/.config/spotatui/plugins/*.lua` at startup. Plugins register callbacks via `spotatui.on(event, fn)` for `start`, `quit`, `track_change`, `playback_state_change`, `seek`, `volume_change`, and `queue_change`, read playback/track/device snapshots, and drive playback through a curated action API (`play`, `pause`, `next`, `previous`, `seek`, `set_volume`, `shuffle`, `search`, `notify`). A broken plugin is disabled with a status message instead of crashing the app. See `docs/scripting.md`.
 - **SMTC Integration**: System Media Transport Controls is now integrated with the app for Windows users. Users can now control playback state using media keys and check playback state in media flyouts ([#229](https://github.com/LargeModGames/spotatui/issues/229)).
 - **Click and drag to seek on the playbar**: The progress bar is now interactive. Click anywhere on the gauge to jump to that position, or click and drag to scrub. Control buttons keep priority, the time label stays non-clickable, and seeks reuse the existing native and throttled-API paths ([#157](https://github.com/LargeModGames/spotatui/issues/157)).
 

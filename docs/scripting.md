@@ -1,0 +1,109 @@
+# Lua scripting
+
+spotatui can run user-written Lua plugins. Plugins react to playback events and can drive
+playback through a small, curated API. Scripting is compiled in behind the `scripting`
+feature, which is enabled in the default build.
+
+## File locations
+
+Plugins are loaded from your config directory (`~/.config/spotatui/`) at startup:
+
+- `init.lua` is loaded first, if present.
+- Every `plugins/*.lua` file is then loaded, sorted by filename.
+
+Missing files or a missing `plugins/` directory are fine. If a file fails to load, the error
+is logged and shown as a status message, and the remaining files still load.
+
+## The `spotatui` API
+
+A global table named `spotatui` is available in every plugin.
+
+### Constants
+
+- `spotatui.api_version` - integer API version (currently `1`).
+
+### Events
+
+Register a callback with `spotatui.on(event, fn)`. Passing an unknown event name raises an
+error. Valid events:
+
+| Event | Argument | Fires when |
+|-------|----------|------------|
+| `start` | none | The app finishes its first render. |
+| `quit` | none | The app is shutting down. |
+| `track_change` | playback table or nil | The current track identity changes (by uri, or name as a fallback), including the first track. |
+| `playback_state_change` | playback table or nil | Playing/paused state changes (no playback counts as not playing). |
+| `seek` | playback table or nil | Same track, same play state, and progress jumps backward by more than 1.5s or forward by more than 6.5s. Forward jumps inside that window are treated as normal Connect polling, not seeks. |
+| `volume_change` | playback table or nil | The device volume percentage changes. |
+| `queue_change` | none | The queue contents change. |
+
+You can register multiple callbacks for the same event.
+
+### Reads
+
+These return a snapshot of the cached state. Snapshots are refreshed before callbacks run.
+
+- `spotatui.playback()` - playback table, or `nil` when there is no playback.
+- `spotatui.current_track()` - track table, or `nil`.
+- `spotatui.devices()` - array of device tables.
+
+The playback table has these fields:
+
+```
+{
+  track = { uri, name, artists = { ... }, album, duration_ms } or nil,
+  is_playing = bool,
+  progress_ms = number,
+  shuffle = bool,
+  repeat = "off" | "track" | "context",
+  volume_percent = number or nil,
+  device = { id, name, kind, is_active, volume_percent } or nil,
+}
+```
+
+### Actions
+
+Actions are queued and applied by the app on the next opportunity; they do not return a
+result. Every action follows the exact same code path as the equivalent keybinding, including
+native streaming fast paths (librespot) when the native player is active.
+
+- `spotatui.play()` - resume playback. No-op if already playing.
+- `spotatui.pause()` - pause playback. No-op if already paused.
+- `spotatui.next()` - skip to the next track.
+- `spotatui.previous()` - go to the previous track, or restart the current track when more
+  than 3 seconds in (matching the previous-track key behaviour).
+- `spotatui.seek(ms)` - seek to a position in milliseconds.
+- `spotatui.set_volume(pct)` - set volume; clamped to 0-100.
+- `spotatui.shuffle(on)` - set shuffle to the desired state. No-op if already in that state.
+- `spotatui.search(query)` - run a search and open the Search screen.
+- `spotatui.notify(msg, ttl_secs?)` - show a status message (default ttl 4 seconds).
+
+### Logging
+
+- `spotatui.log(msg)` - write an info-level line to the app log.
+
+## Error behavior
+
+Plugin code can never crash the app. If a callback raises an error or panics, the error is
+logged, a highlighted status message is shown in the playbar, and that one callback is
+disabled (one strike). Other callbacks, including other callbacks for the same event, keep
+running.
+
+Plugin errors are shown using the theme's error color and stay visible for 6 seconds.
+Normal notifications (e.g. a "Now playing" message from `spotatui.notify`) cannot overwrite
+a live plugin error -- the error is shown first, and the notification takes effect only after
+the error expires. A later plugin error always replaces an earlier one immediately.
+
+## Sample init.lua
+
+```lua
+spotatui.on("track_change", function(pb)
+  if pb and pb.track then
+    spotatui.notify("Now playing: " .. pb.track.name .. " by " .. table.concat(pb.track.artists, ", "), 4)
+  end
+end)
+
+spotatui.on("start", function()
+  spotatui.log("plugins loaded, api version " .. spotatui.api_version)
+end)
+```
