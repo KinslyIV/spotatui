@@ -24,6 +24,26 @@ pub(super) fn install_api(
 
   tbl.set("api_version", plugin_api::API_VERSION)?;
 
+  // spotatui.require_api(n): assert this build is new enough for the plugin.
+  {
+    let require_api = lua.create_function(move |_, n: i64| {
+      if n < 1 {
+        return Err(mlua::Error::RuntimeError(format!(
+          "spotatui.require_api: version must be a positive integer, got {n}"
+        )));
+      }
+      let n = n as u32;
+      if n > plugin_api::API_VERSION {
+        return Err(mlua::Error::RuntimeError(format!(
+          "requires spotatui scripting API v{n} (this build provides v{}); update spotatui to use this plugin",
+          plugin_api::API_VERSION
+        )));
+      }
+      Ok(())
+    })?;
+    tbl.set("require_api", require_api)?;
+  }
+
   // spotatui.on(event, fn)
   {
     let lua_inner = lua.clone();

@@ -70,6 +70,27 @@ Requires `git` on your PATH.",
             .help("Plugin to update (updates all plugins if omitted)"),
         ),
     )
+    .subcommand(
+      Command::new("new")
+        .about("Scaffold a new plugin to start from")
+        .long_about(
+          "Create a new directory plugin in ~/.config/spotatui/plugins/<name>/ with a working \
+main.lua and a README.md to edit and publish.",
+        )
+        .arg(
+          Arg::new("name")
+            .required(true)
+            .value_name("NAME")
+            .help("Name of the plugin to create"),
+        )
+        .arg(
+          Arg::new("force")
+            .short('f')
+            .long("force")
+            .action(ArgAction::SetTrue)
+            .help("Overwrite an existing plugin directory of the same name"),
+        ),
+    )
 }
 
 /// Entry point dispatched from `runtime.rs`. Resolves the config dir and runs the chosen action.
@@ -88,6 +109,10 @@ pub fn handle_plugin_command(matches: &ArgMatches) -> Result<()> {
       remove_plugin(&config_dir, name)
     }
     Some(("update", m)) => update_plugins(&config_dir, m.get_one::<String>("name")),
+    Some(("new", m)) => {
+      let name = m.get_one::<String>("name").expect("name is required");
+      new_plugin(&config_dir, name, m.get_flag("force"))
+    }
     _ => unreachable!("clap enforces a subcommand"),
   }
 }
@@ -260,6 +285,99 @@ fn update_plugins(config_dir: &Path, name: Option<&String>) -> Result<()> {
     save_lock(&lock_path, &lock)?;
   }
   Ok(())
+}
+
+fn new_plugin(config_dir: &Path, name: &str, force: bool) -> Result<()> {
+  if !valid_plugin_name(name) {
+    bail!(
+      "invalid plugin name '{name}'. Use letters, digits, '.', '_', '-', and don't start with '.'."
+    );
+  }
+
+  let plugins_dir = config_dir.join("plugins");
+  let dest = plugins_dir.join(name);
+  if dest.exists() {
+    if !force {
+      bail!(
+        "'{}' already exists. Use `--force` to overwrite.",
+        dest.display()
+      );
+    }
+    std::fs::remove_dir_all(&dest)
+      .with_context(|| format!("removing existing {}", dest.display()))?;
+  }
+
+  std::fs::create_dir_all(&dest).with_context(|| format!("creating {}", dest.display()))?;
+
+  let main_lua = scaffold_main_lua(name);
+  let readme = scaffold_readme(name);
+  std::fs::write(dest.join("main.lua"), main_lua)
+    .with_context(|| format!("writing {}", dest.join("main.lua").display()))?;
+  std::fs::write(dest.join("README.md"), readme)
+    .with_context(|| format!("writing {}", dest.join("README.md").display()))?;
+
+  println!("Created plugin '{name}' at {}", dest.display());
+  println!("Next steps:");
+  println!("  1. Edit {}", dest.join("main.lua").display());
+  println!(
+    "  2. Bind its command in config.yml under `plugin_commands` (e.g. {name}_hello: \"ctrl-h\")"
+  );
+  println!("  3. Restart spotatui to load it");
+  println!("  4. To publish: `git init` in the directory and push to a git host");
+  Ok(())
+}
+
+fn scaffold_main_lua(name: &str) -> String {
+  let api_version = crate::core::plugin_api::API_VERSION;
+  format!(
+    r#"-- {name}: a spotatui plugin.
+-- Suggested key binding (add to config.yml under `plugin_commands`):
+--   {name}_hello: "ctrl-h"
+
+spotatui.require_api({api_version})
+
+spotatui.register_command("{name}_hello", function()
+  spotatui.notify("hello from {name}", 3)
+end)
+
+-- Uncomment to react to track changes:
+-- spotatui.on("track_change", function(pb)
+--   if pb and pb.track then
+--     spotatui.set_playbar(pb.track.name)
+--   end
+-- end)
+"#
+  )
+}
+
+fn scaffold_readme(name: &str) -> String {
+  format!(
+    r#"# {name}
+
+A spotatui plugin.
+
+## What it does
+
+Registers a `{name}_hello` command that shows a notification. Edit `main.lua` to make it your own.
+
+## Install
+
+```bash
+spotatui plugin add owner/{name}
+```
+
+Or copy this directory into `~/.config/spotatui/plugins/`.
+
+## Key binding
+
+This plugin registers the `{name}_hello` command. Bind it in `config.yml`:
+
+```yaml
+plugin_commands:
+  {name}_hello: "ctrl-h"
+```
+"#
+  )
 }
 
 // --- repo spec parsing ---

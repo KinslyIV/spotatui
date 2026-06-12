@@ -109,6 +109,44 @@ fn unknown_event_name_is_an_error() {
   assert!(result.is_err());
 }
 
+// --- require_api ---
+
+#[test]
+fn require_api_at_or_below_current_succeeds() {
+  use crate::core::plugin_api::API_VERSION;
+  let mut engine = ScriptEngine::new().unwrap();
+  engine
+    .load_source("test", &format!("spotatui.require_api({API_VERSION})"))
+    .unwrap();
+  engine
+    .load_source("test2", "spotatui.require_api(1)")
+    .unwrap();
+}
+
+#[test]
+fn require_api_above_current_fails_with_clear_message() {
+  use crate::core::plugin_api::API_VERSION;
+  let mut engine = ScriptEngine::new().unwrap();
+  let too_high = API_VERSION + 1;
+  let err = engine
+    .load_source("test", &format!("spotatui.require_api({too_high})"))
+    .unwrap_err()
+    .to_string();
+  assert!(err.contains(&too_high.to_string()), "message: {err}");
+  assert!(err.contains(&API_VERSION.to_string()), "message: {err}");
+
+  // The engine is not poisoned: a later, compatible plugin still loads.
+  engine.load_source("ok", "spotatui.require_api(1)").unwrap();
+}
+
+#[test]
+fn require_api_rejects_non_positive_version() {
+  let mut engine = ScriptEngine::new().unwrap();
+  assert!(engine
+    .load_source("test", "spotatui.require_api(0)")
+    .is_err());
+}
+
 // --- action functions queue the right effect ---
 
 fn run_action(src: &str) -> ScriptEffect {

@@ -2,7 +2,9 @@
 
 Small, self-contained Lua plugins that demonstrate the spotatui plugin API. Copy one into your
 config directory and restart spotatui to try it. See [`docs/scripting.md`](../../docs/scripting.md)
-for the full API reference.
+for the full API reference. These examples are first-party and auditable; plugins run with full app
+privileges, so read anything you install from elsewhere (see
+[Trust and safety](../../docs/scripting.md#trust-and-safety)).
 
 | Plugin | What it shows |
 |--------|---------------|

@@ -14,11 +14,15 @@ spotatui plugin add owner/repo     # clone + record in the lockfile
 spotatui plugin list               # show installed plugins
 spotatui plugin update             # update all to their latest commit
 spotatui plugin remove <name>      # uninstall
+spotatui plugin new <name>         # scaffold a new plugin to start from
 ```
 
 Plugins are cloned into `~/.config/spotatui/plugins/<name>/` and loaded at startup. Restart
 spotatui after installing, and bind any commands the plugin registers under `plugin_commands` in
 `config.yml`.
+
+Plugins are not sandboxed and run with full app privileges and network access, so only install
+ones you trust. See [Trust and safety](docs/scripting.md#trust-and-safety).
 
 You can also drop a single `.lua` file into `~/.config/spotatui/plugins/` by hand.
 
@@ -34,9 +38,11 @@ These ship in this repo under [`examples/plugins/`](examples/plugins):
 
 ## Sharing your own plugin
 
-A shareable plugin is just a git repository with a `main.lua` (or `init.lua`) entry point at its
-root. Helper modules sit alongside it and load via `require("module")`. Document any command and a
-suggested key binding in your README, but ship the binding as a suggestion, not a hard-coded key.
+Run `spotatui plugin new <name>` to scaffold a starting point. A shareable plugin is just a git
+repository with a `main.lua` (or `init.lua`) entry point at its root. Helper modules sit alongside
+it and load via `require("module")`. Document any command and a suggested key binding in your
+README, but ship the binding as a suggestion, not a hard-coded key.
 
-Publishing one? Open a pull request adding it to this list - a short description and the
-`owner/repo` install line is all it takes.
+Tag your repository with the GitHub topic `spotatui-plugin` so it's discoverable, and open a pull
+request adding it to this list - a short description and the `owner/repo` install line is all it
+takes.

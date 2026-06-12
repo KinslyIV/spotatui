@@ -25,6 +25,17 @@ Directory plugins are how the `spotatui plugin` installer (below) lays out git-c
 Missing files or a missing `plugins/` directory are fine. If a file fails to load, the error
 is logged and shown as a status message, and the remaining plugins still load.
 
+## Trust and safety
+
+Plugins are not sandboxed. A plugin runs with the same privileges as spotatui itself: it has the
+full Lua standard library (including filesystem access via `io`/`os`) and can make arbitrary
+network requests through `spotatui.http_get`/`http_post`. `spotatui plugin add` clones a git
+repository and runs whatever its `main.lua` contains the next time you start spotatui.
+
+Treat installing a plugin like running any other program from the internet: only install plugins
+whose source you have read or whose author you trust, and prefer repositories you control. There is
+no permission prompt and no isolation between a plugin and your account.
+
 ## Installing and managing plugins
 
 A plugin published as a git repository can be installed with the `spotatui plugin` command. This
@@ -39,6 +50,8 @@ spotatui plugin list                # show installed plugins
 spotatui plugin update              # update every plugin to its latest commit
 spotatui plugin update <name>       # update just one
 spotatui plugin remove <name>       # uninstall
+
+spotatui plugin new <name>          # scaffold a new plugin to start from
 ```
 
 `add` clones the repository into `~/.config/spotatui/plugins/<name>/` (a shallow clone) and
@@ -50,6 +63,17 @@ Single-file plugins you drop into `plugins/` by hand are not tracked in the lock
 shows them under "untracked".
 
 ## Publishing a plugin
+
+The quickest start is `spotatui plugin new <name>`, which scaffolds a working directory plugin in
+your config directory:
+
+```bash
+spotatui plugin new my-plugin
+```
+
+This writes `~/.config/spotatui/plugins/my-plugin/main.lua` (with a `require_api` guard, a sample
+command, and a suggested key binding) plus a `README.md`. Edit it, then `git init` and push to
+share it.
 
 A shareable plugin is a git repository with a `main.lua` (or `init.lua`) entry point at its root:
 
@@ -64,13 +88,30 @@ The repository name becomes the local plugin name (its last path segment, minus 
 *suggested* key binding in your README rather than writing to the user's `config.yml`; command
 names are decoupled from keys by design.
 
+To help others find it, add the GitHub topic `spotatui-plugin` to your repository, and open a pull
+request adding it to [`PLUGINS.md`](../PLUGINS.md).
+
 ## The `spotatui` API
 
 A global table named `spotatui` is available in every plugin.
 
 ### Constants
 
-- `spotatui.api_version` - integer API version (currently `3`).
+- `spotatui.api_version` - integer API version (currently `4`).
+
+### Declaring API compatibility
+
+The scripting API is versioned and grows over time. If your plugin uses a feature added in a
+particular version, declare it on the first line so users on an older spotatui get a clear
+message instead of a cryptic `attempt to call nil` error:
+
+```lua
+spotatui.require_api(4)
+```
+
+`spotatui.require_api(n)` raises a load error (`requires spotatui scripting API v{n} ...`) when
+the running build's `api_version` is lower than `n`, which stops that plugin from loading while
+leaving the others untouched. Calling it with a version your build supports is a no-op.
 
 ### Events
 
