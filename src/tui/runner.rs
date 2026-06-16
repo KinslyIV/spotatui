@@ -742,9 +742,9 @@ pub async fn start_ui(
 
     if is_first_render {
       let mut app = app.lock().await;
+      app.dispatch(IoEvent::GetCurrentPlayback);
       app.dispatch(IoEvent::GetPlaylists);
       app.dispatch(IoEvent::GetUser);
-      app.dispatch(IoEvent::GetCurrentPlayback);
       if app.user_config.behavior.enable_global_song_count {
         app.dispatch(IoEvent::FetchGlobalSongCount);
       }

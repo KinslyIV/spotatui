@@ -35,7 +35,16 @@ use std::{
 };
 
 use arboard::Clipboard;
+#[cfg(feature = "streaming")]
+use chrono::Utc;
 use log::info;
+#[cfg(feature = "streaming")]
+use rspotify::model::{
+  context::Actions,
+  device::Device,
+  enums::{CurrentlyPlayingType, RepeatState},
+  DeviceType,
+};
 
 pub const LIBRARY_OPTIONS: [&str; 7] = [
   "Discover",
@@ -2173,6 +2182,49 @@ impl App {
   }
 
   #[cfg(feature = "streaming")]
+  pub fn mark_native_streaming_device_available(
+    &mut self,
+    device_id: String,
+    device_name: String,
+    volume_percent: u8,
+  ) {
+    self.native_device_id = Some(device_id.clone());
+    self.is_streaming_active = true;
+    self.native_activation_pending = false;
+    self.native_is_playing = Some(false);
+
+    if self
+      .current_playback_context
+      .as_ref()
+      .and_then(|ctx| ctx.item.as_ref())
+      .is_some()
+    {
+      return;
+    }
+
+    self.current_playback_context = Some(CurrentPlaybackContext {
+      device: Device {
+        id: Some(device_id),
+        is_active: true,
+        is_private_session: false,
+        is_restricted: false,
+        name: device_name,
+        _type: DeviceType::Computer,
+        volume_percent: Some(u32::from(volume_percent)),
+      },
+      repeat_state: RepeatState::Off,
+      shuffle_state: self.user_config.behavior.shuffle_enabled,
+      context: None,
+      timestamp: Utc::now(),
+      progress: None,
+      is_playing: false,
+      item: None,
+      currently_playing_type: CurrentlyPlayingType::Unknown,
+      actions: Actions::default(),
+    });
+  }
+
+  #[cfg(feature = "streaming")]
   pub fn has_fresh_native_activity(&self) -> bool {
     self.native_track_info.is_some()
       || self.native_is_playing == Some(true)
@@ -2235,6 +2287,16 @@ impl App {
     // Use native streaming player for instant control (bypasses event channel latency)
     #[cfg(feature = "streaming")]
     if self.is_native_streaming_active_for_playback() {
+      if self
+        .current_playback_context
+        .as_ref()
+        .and_then(|ctx| ctx.item.as_ref())
+        .is_none()
+      {
+        self.dispatch(IoEvent::StartPlayback(None, None, None));
+        return;
+      }
+
       if let Some(ref player) = self.streaming_player {
         let is_playing = self
           .native_is_playing
