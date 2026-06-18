@@ -370,12 +370,7 @@ pub(crate) fn playbar_control_hitboxes(
   app: &App,
   playbar_area: Rect,
 ) -> Vec<(PlaybarControl, Rect)> {
-  if app
-    .current_playback_context
-    .as_ref()
-    .and_then(|ctx| ctx.item.as_ref())
-    .is_none()
-  {
+  if !playbar_controls_available(app) {
     return Vec::new();
   }
 
@@ -384,6 +379,12 @@ pub(crate) fn playbar_control_hitboxes(
     .into_iter()
     .map(|hitbox| (hitbox.control, hitbox.rect))
     .collect()
+}
+
+fn playbar_controls_available(app: &App) -> bool {
+  app.current_playback_context.as_ref().is_some_and(|ctx| {
+    ctx.item.is_some() || (app.is_streaming_active && app.native_device_id.is_some())
+  })
 }
 
 pub(crate) fn playbar_control_at(
@@ -974,6 +975,63 @@ pub fn draw_playbar(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
       }
 
       drew_playbar = true;
+    } else if app.is_streaming_active && app.native_device_id.is_some() {
+      let shuffle_text = if current_playback_context.shuffle_state {
+        "On"
+      } else {
+        "Off"
+      };
+      let repeat_text = match current_playback_context.repeat_state {
+        RepeatState::Off => "Off",
+        RepeatState::Track => "Track",
+        RepeatState::Context => "All",
+      };
+      let title = format!(
+        "Ready   ({} | Shuffle: {:-3} | Repeat: {:-5} | Volume: {:-2}%)",
+        current_playback_context.device.name,
+        shuffle_text,
+        repeat_text,
+        app.desired_volume()
+      );
+      let current_route = app.get_current_route();
+      let highlight_state = (
+        matches!(
+          current_route.active_block,
+          ActiveBlock::PlayBar | ActiveBlock::MiniPlayer
+        ),
+        matches!(
+          current_route.hovered_block,
+          ActiveBlock::PlayBar | ActiveBlock::MiniPlayer
+        ),
+      );
+      let mut title_spans = vec![Span::styled(
+        title,
+        get_color(highlight_state, app.user_config.theme),
+      )];
+      if let Some(message) = app.status_message.as_ref() {
+        let msg_style = if app.status_message_is_error {
+          Style::default().fg(app.user_config.theme.error_text)
+        } else {
+          get_color(highlight_state, app.user_config.theme)
+        };
+        title_spans.push(Span::styled(format!(" | {}", message), msg_style));
+      }
+
+      let title_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .style(Style::default().bg(app.user_config.theme.playbar_background))
+        .title(Line::from(title_spans))
+        .border_style(get_color(highlight_state, app.user_config.theme));
+
+      f.render_widget(title_block, layout_chunk);
+      f.render_widget(
+        Paragraph::new("No active playback")
+          .style(Style::default().fg(app.user_config.theme.playbar_text)),
+        artist_area,
+      );
+      draw_playbar_controls(f, app, playbar_areas.controls_area);
+      drew_playbar = true;
     }
   }
 
@@ -1074,6 +1132,42 @@ pub fn draw_device_list(f: &mut Frame<'_>, app: &App) {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use chrono::Utc;
+  use rspotify::model::{
+    context::{Actions, CurrentPlaybackContext},
+    device::Device,
+    enums::{CurrentlyPlayingType, RepeatState},
+    DeviceType,
+  };
+
+  #[allow(deprecated)]
+  fn idle_native_app() -> App {
+    let mut app = App::default();
+    app.is_streaming_active = true;
+    app.native_device_id = Some("native-device".to_string());
+    app.current_playback_context = Some(CurrentPlaybackContext {
+      device: Device {
+        id: Some("native-device".to_string()),
+        is_active: true,
+        is_private_session: false,
+        is_restricted: false,
+        name: "spotatui".to_string(),
+        _type: DeviceType::Computer,
+        volume_percent: Some(50),
+      },
+      repeat_state: RepeatState::Off,
+      shuffle_state: false,
+      context: None,
+      timestamp: Utc::now(),
+      progress: None,
+      is_playing: false,
+      item: None,
+      currently_playing_type: CurrentlyPlayingType::Unknown,
+      actions: Actions::default(),
+    });
+    app.set_current_route_state(Some(ActiveBlock::PlayBar), Some(ActiveBlock::PlayBar));
+    app
+  }
 
   #[test]
   fn control_hitboxes_handle_zero_sized_area() {
@@ -1098,6 +1192,14 @@ mod tests {
       hitboxes[PLAYBAR_CONTROLS.len() - 1].control,
       PlaybarControl::VolumeUp
     );
+  }
+
+  #[test]
+  fn playbar_control_hitboxes_include_controls_for_idle_native_device() {
+    let app = idle_native_app();
+    let hitboxes = playbar_control_hitboxes(&app, Rect::new(0, 0, 200, 6));
+
+    assert_eq!(hitboxes.len(), PLAYBAR_CONTROLS.len());
   }
 
   #[cfg(feature = "cover-art")]
