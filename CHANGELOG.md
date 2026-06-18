@@ -6,6 +6,10 @@
 
 - **Native streaming startup device recovery**: Startup now trusts the local `spotatui` Connect device id, preserves saved external devices, activates the native device when Spotify reports no active playback, and renders an actionable idle playbar so paused native sessions restore without manually opening the device selector ([#301](https://github.com/LargeModGames/spotatui/issues/301)).
 
+### Added
+
+- **Configurable movement keybindings**: `h`/`j`/`k`/`l` keys (traditionally left/down/up/right) are now configurable via `move_left`, `move_down`, `move_up`, and `move_right` under `keybindings` in `config.yml` and via the Settings screen. Defaults match the previous hard-coded bindings, and the arrow key(s) fallbacks still work.
+
 ## [v0.39.1] 2026-06-12
 
 ### Fixed
