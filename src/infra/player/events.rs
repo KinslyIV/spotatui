@@ -564,6 +564,14 @@ async fn handle_player_events(
           track_id, consecutive_unavailable
         );
 
+        // Once several consecutive tracks fail to load (genuinely unavailable,
+        // e.g. region-locked or the audio-key block), halt playback instead of
+        // letting librespot auto-skip through the entire queue at machine speed;
+        // that stampede hammers Spotify and can get the account rate-limited.
+        if consecutive_unavailable >= UNAVAILABLE_ESCALATION_THRESHOLD {
+          player.pause();
+        }
+
         // Emit on the threshold transitions only (== not >=) so we don't spam the
         // same message on every auto-skip during an account-wide failure.
         if consecutive_unavailable == 1 {
@@ -575,7 +583,7 @@ async fn handle_player_events(
         } else if consecutive_unavailable == UNAVAILABLE_ESCALATION_THRESHOLD {
           let mut app = app.lock().await;
           app.set_status_message(
-            "Native playback keeps failing — a known upstream Spotify limitation on some accounts that can't be fixed in spotatui. Press 'd' to switch to an official Spotify Connect device.",
+            "Several tracks in a row couldn't be played natively, so playback was stopped. They may be unavailable on your account or region. Press 'd' to switch to an official Spotify Connect device.",
             20,
           );
         }
