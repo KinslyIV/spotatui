@@ -452,7 +452,7 @@ fn playlist_name_for_id(app: &App, playlist_id: &PlaylistId<'_>) -> Option<Strin
   app
     .all_playlists
     .iter()
-    .find(|playlist| playlist.id.id() == playlist_id.id())
+    .find(|playlist| playlist.id.as_deref() == Some(playlist_id.id()))
     .map(|playlist| playlist.name.clone())
     .or_else(|| {
       app
@@ -508,11 +508,12 @@ fn saved_tracks_playback_request(app: &App) -> Option<(Vec<PlayableId<'static>>,
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::core::plugin_api::TrackInfo;
+  use crate::core::pagination::Paged;
+  use crate::core::plugin_api::{PlayableInfo, TrackInfo};
   use crate::core::test_helpers::full_track;
   use crate::core::user_config::UserConfig;
   use chrono::Utc;
-  use rspotify::model::{page::Page, playlist::PlaylistItem, track::SavedTrack, PlayableItem};
+  use rspotify::model::{page::Page, track::SavedTrack};
   use std::sync::mpsc::channel;
   use std::time::SystemTime;
 
@@ -523,16 +524,8 @@ mod tests {
     }
   }
 
-  #[allow(deprecated)]
-  fn playlist_item(id: &str, name: &str) -> PlaylistItem {
-    let track = PlayableItem::Track(full_track(id, name));
-    PlaylistItem {
-      added_at: Some(Utc::now()),
-      added_by: None,
-      is_local: false,
-      track: None,
-      item: Some(track),
-    }
+  fn playlist_item(id: &str, name: &str) -> PlayableInfo {
+    PlayableInfo::Track(TrackInfo::from(&full_track(id, name)))
   }
 
   fn saved_tracks_page(offset: u32, ids: &[&str], has_next: bool) -> Page<SavedTrack> {
@@ -682,8 +675,7 @@ mod tests {
         .unwrap()
         .into_static(),
     );
-    app.playlist_tracks = Some(Page {
-      href: "https://example.com/playlists/test/items".to_string(),
+    app.playlist_tracks = Some(Paged {
       items: vec![],
       limit: 2,
       next: Some("https://example.com/playlists/test/items?next".to_string()),
@@ -711,8 +703,7 @@ mod tests {
     let playlist_id = PlaylistId::from_id("37i9dQZF1DX4WYpdgoIcn6")
       .unwrap()
       .into_static();
-    let first_page = Page {
-      href: "https://example.com/playlists/test/items".to_string(),
+    let first_page = Paged {
       items: vec![
         playlist_item("0000000000000000000001", "Track 1"),
         playlist_item("0000000000000000000002", "Track 2"),

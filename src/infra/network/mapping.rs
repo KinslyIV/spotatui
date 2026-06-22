@@ -255,6 +255,27 @@ pub fn playable_info(item: &PlayableItem) -> Option<PlayableInfo> {
   }
 }
 
+/// Convert a page of `PlaylistItem` into a domain [`Paged<PlayableInfo>`]. Each
+/// item's inner `track` (`Option<PlayableItem>`) is mapped via [`playable_info`];
+/// items that are `None` or `Unknown` are dropped. Paging metadata is copied
+/// straight from the source page so offset/limit/total math is unchanged.
+pub fn playlist_items_page(
+  page: &Page<rspotify::model::playlist::PlaylistItem>,
+) -> Paged<PlayableInfo> {
+  Paged {
+    items: page
+      .items
+      .iter()
+      .filter_map(|item| item.item.as_ref().and_then(playable_info))
+      .collect(),
+    offset: page.offset,
+    limit: page.limit,
+    total: page.total,
+    next: page.next.clone(),
+    previous: page.previous.clone(),
+  }
+}
+
 // --- Search ----------------------------------------------------------------
 
 /// Assemble domain [`SearchResults`] from whichever rspotify result pages are

@@ -1,6 +1,6 @@
 use super::requests::is_rate_limited_error;
 use super::Network;
-use crate::core::app::{ActiveBlock, DiscoverTimeRange, RouteId};
+use crate::core::app::{ActiveBlock, DiscoverTimeRange, RouteId, UserInfo};
 use crate::core::plugin_api::TrackInfo;
 use anyhow::anyhow;
 
@@ -77,7 +77,17 @@ impl UserNetwork for Network {
     match self.spotify_get_typed::<PrivateUser>("me", &[]).await {
       Ok(user) => {
         let mut app = self.app.lock().await;
-        app.user = Some(user);
+        // `PrivateUser::country` is deprecated upstream but still the only
+        // market signal available; mirror the existing read in `get_user_country`.
+        #[allow(deprecated)]
+        let country = user.country.map(|c| <&'static str>::from(c).to_string());
+        app.user = Some(UserInfo {
+          id: user.id.id().to_string(),
+          display_name: user.display_name.clone(),
+          // Store the ISO 3166-1 alpha-2 code as a plain string so no rspotify
+          // type leaks into App state; `App::get_user_country` re-derives it.
+          country,
+        });
       }
       Err(e) => {
         let err = anyhow!(e);

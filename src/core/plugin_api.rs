@@ -90,12 +90,17 @@ pub struct DeviceInfo {
 pub struct PlaylistInfo {
   pub uri: String,
   pub name: String,
+  /// Owner display name (falls back to the owner id when no display name is set).
   pub owner: String,
   pub track_count: u32,
   // --- Additive fields (post-Phase-0); see TrackInfo note above. ---
   /// Spotify base62 playlist id, when known.
   #[serde(default)]
   pub id: Option<String>,
+  /// Owner's base62 user id, when known. Used for ownership checks (the display
+  /// `owner` is not stable for comparison).
+  #[serde(default)]
+  pub owner_id: Option<String>,
   #[serde(default)]
   pub collaborative: bool,
   #[serde(default)]
@@ -247,6 +252,7 @@ impl PlaylistInfo {
       owner,
       track_count: p.items.total,
       id: Some(p.id.id().to_string()),
+      owner_id: Some(p.owner.id.id().to_string()),
       collaborative: p.collaborative,
       public: p.public,
       image_url: p.images.first().map(|img| img.url.clone()),
@@ -498,6 +504,7 @@ mod tests {
     assert_eq!(info.name, "Today's Top Hits");
     // test_helpers::simplified_playlist sets owner display_name = owner_id
     assert_eq!(info.owner, "spotify");
+    assert_eq!(info.owner_id.as_deref(), Some("spotify"));
     assert_eq!(info.track_count, 5);
   }
 
@@ -541,6 +548,7 @@ mod tests {
     };
     let info = PlaylistInfo::from_simplified(&playlist);
     assert_eq!(info.owner, "spotifyuser");
+    assert_eq!(info.owner_id.as_deref(), Some("spotifyuser"));
     assert_eq!(info.track_count, 10);
   }
 }

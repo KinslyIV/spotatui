@@ -1,4 +1,5 @@
-use crate::core::plugin_api::TrackInfo;
+use crate::core::pagination::Paged;
+use crate::core::plugin_api::{PlayableInfo, PlaylistInfo, TrackInfo};
 use crate::core::sort::{SortContext, SortField, SortOrder, SortState};
 use crate::core::user_config::{color_to_string, normalize_tick_rate_milliseconds, UserConfig};
 use crate::infra::network::sync::{PartySession, PartyStatus};
@@ -13,12 +14,11 @@ use rspotify::{
     artist::FullArtist,
     context::{CurrentPlaybackContext, CurrentUserQueue},
     device::DevicePayload,
-    idtypes::{AlbumId, ArtistId, PlaylistId, ShowId, TrackId},
+    idtypes::{AlbumId, ArtistId, PlaylistId, ShowId, TrackId, UserId},
     page::{CursorBasedPage, Page},
-    playlist::{PlaylistItem, SimplifiedPlaylist},
+    playlist::SimplifiedPlaylist,
     show::{FullShow, Show, SimplifiedEpisode, SimplifiedShow},
     track::{FullTrack, SavedTrack},
-    user::PrivateUser,
     PlayableItem,
   },
   prelude::*, // Adds Id trait for .id() method
@@ -141,6 +141,58 @@ impl<T: DeserializeOwned> ScrollableResultPages<Page<T>> {
       .page_index_for_offset(new_page_offset)
       .expect("upserted page offset must exist in cache")
   }
+}
+
+// Domain (`Paged<T>`) counterpart of the offset-keyed cache helpers above. The
+// page cache is kept sorted by `Paged::offset` and may be sparse, so visible-page
+// identity is derived from the offset, never raw cache adjacency.
+impl<T> ScrollableResultPages<Paged<T>> {
+  pub fn page_index_for_offset(&self, offset: u32) -> Option<usize> {
+    self
+      .pages
+      .binary_search_by_key(&offset, |page| page.offset)
+      .ok()
+  }
+
+  pub fn upsert_page_by_offset(&mut self, new_page: Paged<T>) -> usize {
+    let active_page_offset = self.pages.get(self.index).map(|page| page.offset);
+    let new_page_offset = new_page.offset;
+
+    match self
+      .pages
+      .binary_search_by_key(&new_page.offset, |page| page.offset)
+    {
+      Ok(index) => {
+        self.pages[index] = new_page;
+      }
+      Err(index) => {
+        self.pages.insert(index, new_page);
+      }
+    };
+
+    if let Some(active_page_offset) = active_page_offset {
+      if let Some(active_page_index) = self.page_index_for_offset(active_page_offset) {
+        self.index = active_page_index;
+      }
+    } else if !self.pages.is_empty() {
+      self.index = 0;
+    }
+
+    self
+      .page_index_for_offset(new_page_offset)
+      .expect("upserted page offset must exist in cache")
+  }
+}
+
+/// Minimal source-agnostic snapshot of the signed-in user, used for playlist
+/// ownership checks and market/country resolution. Holds only string fields so
+/// no `rspotify::model` type leaks into [`App`] state.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct UserInfo {
+  pub id: String,
+  pub display_name: Option<String>,
+  /// ISO 3166-1 alpha-2 country code (e.g. `"US"`), when known.
+  pub country: Option<String>,
 }
 
 #[derive(Default)]
@@ -781,12 +833,12 @@ pub struct App {
   pub saved_show_ids_set: HashSet<String>,
   pub library: Library,
   pub playlist_offset: u32,
-  pub playlist_tracks: Option<Page<PlaylistItem>>,
-  pub playlist_track_pages: ScrollableResultPages<Page<PlaylistItem>>,
+  pub playlist_tracks: Option<Paged<PlayableInfo>>,
+  pub playlist_track_pages: ScrollableResultPages<Paged<PlayableInfo>>,
   pub playlist_track_table_id: Option<PlaylistId<'static>>,
   pub active_playlist_track_filter: Option<String>,
   pub pending_playlist_track_search: Option<String>,
-  pub playlists: Option<Page<SimplifiedPlaylist>>,
+  pub playlists: Option<Paged<PlaylistInfo>>,
   pub recently_played: SpotifyResultAndSelectedIndex<
     Option<crate::core::pagination::CursorPaged<crate::core::plugin_api::TrackInfo>>,
   >,
@@ -817,7 +869,7 @@ pub struct App {
   pub episode_table_context: EpisodeTableContext,
   pub selected_show_simplified: Option<SelectedShow>,
   pub selected_show_full: Option<SelectedFullShow>,
-  pub user: Option<PrivateUser>,
+  pub user: Option<UserInfo>,
   pub album_list_index: usize,
   pub artists_list_index: usize,
   pub clipboard: Option<Clipboard>,
@@ -929,7 +981,7 @@ pub struct App {
   /// Pending track removal info in remove-from-playlist confirmation flow
   pub pending_playlist_track_removal: Option<PendingPlaylistTrackRemoval>,
   /// Full flat list of all user playlists (all pages combined)
-  pub all_playlists: Vec<SimplifiedPlaylist>,
+  pub all_playlists: Vec<PlaylistInfo>,
   /// Folder tree from rootlist (None if not fetched or streaming disabled)
   pub _playlist_folder_nodes: Option<Vec<PlaylistFolderNode>>,
   /// Flattened folder+playlist items for display navigation
@@ -1482,15 +1534,15 @@ impl App {
     true
   }
 
-  pub fn playlist_is_editable(&self, playlist: &SimplifiedPlaylist) -> bool {
+  pub fn playlist_is_editable(&self, playlist: &PlaylistInfo) -> bool {
     let Some(user) = &self.user else {
       return false;
     };
 
-    playlist.owner.id.id() == user.id.id() || playlist.collaborative
+    playlist.owner_id.as_deref() == Some(user.id.as_str()) || playlist.collaborative
   }
 
-  pub fn editable_playlists(&self) -> Vec<&SimplifiedPlaylist> {
+  pub fn editable_playlists(&self) -> Vec<&PlaylistInfo> {
     self
       .all_playlists
       .iter()
@@ -1574,9 +1626,9 @@ impl App {
       .collect()
   }
 
-  /// Get the SimplifiedPlaylist for a PlaylistFolderItem::Playlist variant
+  /// Get the playlist for a PlaylistFolderItem::Playlist variant
   #[allow(dead_code)]
-  pub fn get_playlist_for_item(&self, item: &PlaylistFolderItem) -> Option<&SimplifiedPlaylist> {
+  pub fn get_playlist_for_item(&self, item: &PlaylistFolderItem) -> Option<&PlaylistInfo> {
     match item {
       PlaylistFolderItem::Playlist { index, .. } => self.all_playlists.get(*index),
       PlaylistFolderItem::Folder(_) => None,
@@ -1590,17 +1642,14 @@ impl App {
     if let Some(PlaylistFolderItem::Playlist { index, .. }) =
       self.get_playlist_display_item_at(selected_index)
     {
-      return self
-        .all_playlists
-        .get(*index)
-        .map(|p| p.id.id().to_string());
+      return self.all_playlists.get(*index).and_then(|p| p.id.clone());
     }
 
     self
       .playlists
       .as_ref()
       .and_then(|playlists| playlists.items.get(selected_index))
-      .map(|playlist| playlist.id.id().to_string())
+      .and_then(|playlist| playlist.id.clone())
   }
 
   fn apply_seek(&mut self, seek_ms: u32) {
@@ -2610,11 +2659,11 @@ impl App {
       }
 
       for (idx, item) in page.items.iter().enumerate() {
-        if let Some(PlayableItem::Track(full_track)) = item.item.as_ref() {
-          tracks.push(TrackInfo::from(full_track));
-          if let Some(track_id) = full_track.id.as_ref() {
-            track_ids.push(track_id.clone().into_static());
+        if let PlayableInfo::Track(track) = item {
+          if let Some(id) = track.id.as_ref().and_then(|id| TrackId::from_id(id).ok()) {
+            track_ids.push(id.into_static());
           }
+          tracks.push(track.clone());
           positions.push(page.offset as usize + idx);
         }
       }
@@ -3214,13 +3263,15 @@ impl App {
       if let Some(PlaylistFolderItem::Playlist { index, .. }) =
         self.get_playlist_display_item_at(selected_index)
       {
-        if let Some(playlist) = self.all_playlists.get(*index) {
-          let selected_id = playlist.id.clone();
-          let user_id = user.id.clone();
-          self.dispatch(IoEvent::UserUnfollowPlaylist(
-            user_id.into_static(),
-            selected_id.into_static(),
-          ));
+        // Re-parse the stored string ids into rspotify Ids for the IoEvent.
+        let ids = self.all_playlists.get(*index).and_then(|playlist| {
+          let playlist_id = playlist.id.as_deref()?;
+          let selected_id = PlaylistId::from_id(playlist_id).ok()?.into_static();
+          let user_id = UserId::from_id(user.id.as_str()).ok()?.into_static();
+          Some((user_id, selected_id))
+        });
+        if let Some((user_id, selected_id)) = ids {
+          self.dispatch(IoEvent::UserUnfollowPlaylist(user_id, selected_id));
         }
       }
     }
@@ -3235,11 +3286,13 @@ impl App {
     ) {
       let selected_playlist = &playlists.items[selected_index];
       let selected_id = selected_playlist.id.clone();
-      let user_id = user.id.clone();
-      self.dispatch(IoEvent::UserUnfollowPlaylist(
-        user_id.into_static(),
-        selected_id.into_static(),
-      ));
+      // `user.id` is the domain string id; re-parse it into an rspotify UserId.
+      if let Ok(user_id) = UserId::from_id(user.id.as_str()) {
+        self.dispatch(IoEvent::UserUnfollowPlaylist(
+          user_id.into_static(),
+          selected_id.into_static(),
+        ));
+      }
     }
   }
 
@@ -3376,9 +3429,12 @@ impl App {
     ));
   }
 
-  #[allow(deprecated)]
   pub fn get_user_country(&self) -> Option<Country> {
-    self.user.as_ref().and_then(|user| user.country)
+    // `country` is stored as its ISO 3166-1 alpha-2 string (the multi-source
+    // domain holds no rspotify types); re-derive the rspotify `Country` here at
+    // the boundary, the same way IDs are re-parsed when dispatching IoEvents.
+    let code = self.user.as_ref().and_then(|user| user.country.as_deref())?;
+    serde_json::from_value(serde_json::Value::String(code.to_string())).ok()
   }
 
   pub fn calculate_help_menu_offset(&mut self) {
@@ -4514,7 +4570,7 @@ impl App {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::core::test_helpers::{private_user, simplified_playlist};
+  use crate::core::test_helpers::{playlist_info, user_info};
   use chrono::{Duration as ChronoDuration, Utc};
   use rspotify::model::{artist::SimplifiedArtist, idtypes::PlaylistId};
   use rspotify::prelude::Id;
@@ -4620,9 +4676,8 @@ mod tests {
     total: u32,
     limit: u32,
     has_next: bool,
-  ) -> Page<PlaylistItem> {
-    Page {
-      href: "https://example.com/playlists/test/items".to_string(),
+  ) -> Paged<PlayableInfo> {
+    Paged {
       items: vec![],
       limit,
       next: has_next.then(|| "https://example.com/playlists/test/items?next".to_string()),
@@ -4632,22 +4687,16 @@ mod tests {
     }
   }
 
-  #[allow(deprecated)]
-  fn playlist_page(offset: u32, total: u32, ids: &[&str], has_next: bool) -> Page<PlaylistItem> {
-    Page {
-      href: "https://example.com/playlists/test/items".to_string(),
+  fn playlist_page(offset: u32, total: u32, ids: &[&str], has_next: bool) -> Paged<PlayableInfo> {
+    Paged {
       items: ids
         .iter()
         .enumerate()
         .map(|(index, id)| {
-          let track = PlayableItem::Track(full_track(id, &format!("Track {offset}-{index}")));
-          PlaylistItem {
-            added_at: Some(Utc::now()),
-            added_by: None,
-            is_local: false,
-            track: Some(track.clone()),
-            item: Some(track),
-          }
+          PlayableInfo::Track(TrackInfo::from(&full_track(
+            id,
+            &format!("Track {offset}-{index}"),
+          )))
         })
         .collect(),
       limit: ids.len() as u32,
@@ -5039,16 +5088,11 @@ mod tests {
   fn editable_playlists_include_owned_and_collaborative_only() {
     let (tx, _rx) = channel();
     let mut app = App::new(tx, UserConfig::new(), SystemTime::now());
-    app.user = Some(private_user("spotatui-owner"));
+    app.user = Some(user_info("spotatui-owner"));
     app.all_playlists = vec![
-      simplified_playlist("37i9dQZF1DXcBWIGoYBM5M", "Owned", "spotatui-owner", false),
-      simplified_playlist(
-        "37i9dQZF1DX4WYpdgoIcn6",
-        "Collaborative",
-        "friend-owner",
-        true,
-      ),
-      simplified_playlist("37i9dQZF1DWZqd5JICZI0u", "Followed", "friend-owner", false),
+      playlist_info("37i9dQZF1DXcBWIGoYBM5M", "Owned", "spotatui-owner", false),
+      playlist_info("37i9dQZF1DX4WYpdgoIcn6", "Collaborative", "friend-owner", true),
+      playlist_info("37i9dQZF1DWZqd5JICZI0u", "Followed", "friend-owner", false),
     ];
 
     let editable_names = app
@@ -5064,17 +5108,12 @@ mod tests {
   fn begin_add_track_to_playlist_flow_requires_editable_playlist() {
     let (tx, _rx) = channel();
     let mut app = App::new(tx, UserConfig::new(), SystemTime::now());
-    app.user = Some(private_user("spotatui-owner"));
-    app.playlists = Some(Page {
-      href: "https://api.spotify.com/v1/me/playlists".to_string(),
-      items: vec![],
-      limit: 50,
-      next: None,
-      offset: 0,
-      previous: None,
+    app.user = Some(user_info("spotatui-owner"));
+    app.playlists = Some(Paged {
       total: 1,
+      ..Default::default()
     });
-    app.all_playlists = vec![simplified_playlist(
+    app.all_playlists = vec![playlist_info(
       "37i9dQZF1DWZqd5JICZI0u",
       "Followed",
       "friend-owner",
