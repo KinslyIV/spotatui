@@ -102,6 +102,10 @@ pub struct PlaylistInfo {
   pub public: Option<bool>,
   #[serde(default)]
   pub image_url: Option<String>,
+  /// Spotify base62 user id of the playlist owner.
+  /// Needed to dispatch `UserFollowPlaylist`; populated in `from_simplified`.
+  #[serde(default)]
+  pub owner_id: Option<String>,
 }
 
 /// A navigable reference to an artist: optional Spotify id plus display name.
@@ -250,6 +254,7 @@ impl PlaylistInfo {
       collaborative: p.collaborative,
       public: p.public,
       image_url: p.images.first().map(|img| img.url.clone()),
+      owner_id: Some(p.owner.id.id().to_string()),
     }
   }
 }
