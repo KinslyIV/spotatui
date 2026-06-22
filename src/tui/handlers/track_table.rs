@@ -524,8 +524,11 @@ mod tests {
     }
   }
 
-  fn playlist_item(id: &str, name: &str) -> PlayableInfo {
-    PlayableInfo::Track(TrackInfo::from(&full_track(id, name)))
+  fn playlist_item(position: u32, id: &str, name: &str) -> (u32, PlayableInfo) {
+    (
+      position,
+      PlayableInfo::Track(TrackInfo::from(&full_track(id, name))),
+    )
   }
 
   fn saved_tracks_page(offset: u32, ids: &[&str], has_next: bool) -> Page<SavedTrack> {
@@ -705,8 +708,8 @@ mod tests {
       .into_static();
     let first_page = Paged {
       items: vec![
-        playlist_item("0000000000000000000001", "Track 1"),
-        playlist_item("0000000000000000000002", "Track 2"),
+        playlist_item(0, "0000000000000000000001", "Track 1"),
+        playlist_item(1, "0000000000000000000002", "Track 2"),
       ],
       limit: 2,
       next: None,

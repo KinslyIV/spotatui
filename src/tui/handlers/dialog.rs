@@ -94,7 +94,10 @@ fn handle_add_to_playlist_picker(key: Key, app: &mut App) {
           .and_then(|id| PlaylistId::from_id(id).ok())
           .map(|id| id.into_static());
         if let Some(playlist_id) = playlist_id {
-          app.dispatch(IoEvent::AddTrackToPlaylist(playlist_id, pending_add.track_id));
+          app.dispatch(IoEvent::AddTrackToPlaylist(
+            playlist_id,
+            pending_add.track_id,
+          ));
         }
       }
       close_dialog(app);
@@ -170,7 +173,12 @@ mod tests {
     app.all_playlists = vec![
       playlist_info("37i9dQZF1DWZqd5JICZI0u", "Followed", "friend-owner", false),
       playlist_info("37i9dQZF1DXcBWIGoYBM5M", "Owned", "spotatui-owner", false),
-      playlist_info("37i9dQZF1DX4WYpdgoIcn6", "Collaborative", "friend-owner", true),
+      playlist_info(
+        "37i9dQZF1DX4WYpdgoIcn6",
+        "Collaborative",
+        "friend-owner",
+        true,
+      ),
     ];
     app.pending_playlist_track_add = Some(PendingPlaylistTrackAdd {
       track_id: TrackId::from_id("0000000000000000000001")

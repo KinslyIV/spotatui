@@ -1,7 +1,7 @@
+use super::mapping::{map_page, playlist_items_page};
 use super::requests::{
   spotify_api_request_json_for_with_refresh, spotify_get_typed_compat_for_with_refresh,
 };
-use super::mapping::{map_page, playlist_items_page};
 use super::{IoEvent, Network};
 use crate::core::app::{
   ActiveBlock, App, PlaylistFolder, PlaylistFolderItem, PlaylistFolderNode, PlaylistFolderNodeType,

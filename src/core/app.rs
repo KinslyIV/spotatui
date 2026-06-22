@@ -833,8 +833,12 @@ pub struct App {
   pub saved_show_ids_set: HashSet<String>,
   pub library: Library,
   pub playlist_offset: u32,
-  pub playlist_tracks: Option<Paged<PlayableInfo>>,
-  pub playlist_track_pages: ScrollableResultPages<Paged<PlayableInfo>>,
+  // Each item carries its absolute playlist position (`page.offset + raw slot
+  // index`) alongside the playable. The position is computed in the mapping
+  // layer before unparseable/local slots are dropped, so removal-by-position and
+  // play-from-here offsets stay correct (see `playlist_items_page`).
+  pub playlist_tracks: Option<Paged<(u32, PlayableInfo)>>,
+  pub playlist_track_pages: ScrollableResultPages<Paged<(u32, PlayableInfo)>>,
   pub playlist_track_table_id: Option<PlaylistId<'static>>,
   pub active_playlist_track_filter: Option<String>,
   pub pending_playlist_track_search: Option<String>,
@@ -2658,13 +2662,13 @@ impl App {
         break;
       }
 
-      for (idx, item) in page.items.iter().enumerate() {
+      for (position, item) in page.items.iter() {
         if let PlayableInfo::Track(track) = item {
           if let Some(id) = track.id.as_ref().and_then(|id| TrackId::from_id(id).ok()) {
             track_ids.push(id.into_static());
           }
           tracks.push(track.clone());
-          positions.push(page.offset as usize + idx);
+          positions.push(*position as usize);
         }
       }
 
@@ -3433,7 +3437,10 @@ impl App {
     // `country` is stored as its ISO 3166-1 alpha-2 string (the multi-source
     // domain holds no rspotify types); re-derive the rspotify `Country` here at
     // the boundary, the same way IDs are re-parsed when dispatching IoEvents.
-    let code = self.user.as_ref().and_then(|user| user.country.as_deref())?;
+    let code = self
+      .user
+      .as_ref()
+      .and_then(|user| user.country.as_deref())?;
     serde_json::from_value(serde_json::Value::String(code.to_string())).ok()
   }
 
@@ -4676,7 +4683,7 @@ mod tests {
     total: u32,
     limit: u32,
     has_next: bool,
-  ) -> Paged<PlayableInfo> {
+  ) -> Paged<(u32, PlayableInfo)> {
     Paged {
       items: vec![],
       limit,
@@ -4687,16 +4694,23 @@ mod tests {
     }
   }
 
-  fn playlist_page(offset: u32, total: u32, ids: &[&str], has_next: bool) -> Paged<PlayableInfo> {
+  fn playlist_page(
+    offset: u32,
+    total: u32,
+    ids: &[&str],
+    has_next: bool,
+  ) -> Paged<(u32, PlayableInfo)> {
     Paged {
       items: ids
         .iter()
         .enumerate()
         .map(|(index, id)| {
-          PlayableInfo::Track(TrackInfo::from(&full_track(
+          let position = offset + index as u32;
+          let track = PlayableInfo::Track(TrackInfo::from(&full_track(
             id,
             &format!("Track {offset}-{index}"),
-          )))
+          )));
+          (position, track)
         })
         .collect(),
       limit: ids.len() as u32,
@@ -5091,7 +5105,12 @@ mod tests {
     app.user = Some(user_info("spotatui-owner"));
     app.all_playlists = vec![
       playlist_info("37i9dQZF1DXcBWIGoYBM5M", "Owned", "spotatui-owner", false),
-      playlist_info("37i9dQZF1DX4WYpdgoIcn6", "Collaborative", "friend-owner", true),
+      playlist_info(
+        "37i9dQZF1DX4WYpdgoIcn6",
+        "Collaborative",
+        "friend-owner",
+        true,
+      ),
       playlist_info("37i9dQZF1DWZqd5JICZI0u", "Followed", "friend-owner", false),
     ];
 
