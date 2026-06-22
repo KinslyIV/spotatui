@@ -54,6 +54,10 @@ ratatui-image = { version = "11.0.4", optional = true, default-features = false,
 image = { version = "0.25", optional = true }
 mlua = { version = "0.11", features = ["lua54", "vendored", "serde"], optional = true }
 
+# Local-files media source dependencies
+symphonia = { version = "0.5", features = ["mp3", "flac", "ogg", "wav", "aiff", "isomp4", "mkv", "pcm", "vorbis"], optional = true, default-features = false }
+lofty = { version = "0.22", optional = true }
+
 # Streaming dependencies (librespot)
 librespot-core = { version = "0.8", optional = true }
 librespot-connect = { version = "0.8", optional = true }
@@ -122,6 +126,10 @@ windows-media = ["smtc-tokio", "streaming"] # windows SMTC integration
 discord-rpc = ["discord-rich-presence"]
 cover-art = ["ratatui-image", "image"]
 scripting = ["dep:mlua"]
+local-files = ["dep:symphonia", "dep:lofty"]
+
+[dev-dependencies]
+tempfile = "3"
 
 [target.'cfg(target_env = "musl")'.dependencies]
 openssl-sys = { version = "0.9", features = ["vendored"] }
