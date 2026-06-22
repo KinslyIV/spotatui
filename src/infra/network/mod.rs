@@ -6,6 +6,7 @@ pub mod playback;
 pub mod recommend;
 pub mod requests;
 pub mod search;
+pub mod spotify_source;
 pub mod sync;
 pub mod user;
 pub mod utils;
