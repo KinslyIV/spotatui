@@ -568,7 +568,8 @@ mod tests {
   use super::*;
   use crate::core::{
     app::{ActiveBlock, RouteId},
-    test_helpers::{full_track, private_user, simplified_playlist},
+    pagination::Paged,
+    test_helpers::{full_track, playlist_info, user_info},
     user_config::UserConfig,
   };
   use rspotify::model::page::Page;
@@ -578,17 +579,12 @@ mod tests {
   fn pressing_w_on_search_song_opens_add_to_playlist_picker() {
     let (tx, _rx) = channel();
     let mut app = App::new(tx, UserConfig::new(), SystemTime::now());
-    app.user = Some(private_user("spotatui-owner"));
-    app.playlists = Some(Page {
-      href: "https://api.spotify.com/v1/me/playlists".to_string(),
-      items: vec![],
-      limit: 50,
-      next: None,
-      offset: 0,
-      previous: None,
+    app.user = Some(user_info("spotatui-owner"));
+    app.playlists = Some(Paged {
       total: 1,
+      ..Default::default()
     });
-    app.all_playlists = vec![simplified_playlist(
+    app.all_playlists = vec![playlist_info(
       "37i9dQZF1DXcBWIGoYBM5M",
       "Owned Playlist",
       "spotatui-owner",

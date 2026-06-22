@@ -227,7 +227,7 @@ impl CliApp {
             .map(|p| {
               self.format_output(
                 format.to_string(),
-                Format::from_type(FormatType::Playlist(Box::new(p.clone()))),
+                Format::from_type(FormatType::PlaylistInfo(Box::new(p.clone()))),
               )
             })
             .collect::<Vec<String>>()

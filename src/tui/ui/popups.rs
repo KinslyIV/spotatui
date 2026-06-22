@@ -9,7 +9,6 @@ use ratatui::{
   widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Row, Table, Wrap},
   Frame,
 };
-use rspotify::prelude::Id;
 
 use super::help::get_help_docs;
 
@@ -374,11 +373,11 @@ fn draw_add_track_to_playlist_picker_dialog(f: &mut Frame<'_>, app: &App) {
       .alignment(Alignment::Center);
     f.render_widget(empty_text, vchunks[1]);
   } else {
-    let is_own_playlist = |playlist: &rspotify::model::SimplifiedPlaylist| -> bool {
+    let is_own_playlist = |playlist: &crate::core::plugin_api::PlaylistInfo| -> bool {
       app
         .user
         .as_ref()
-        .is_some_and(|user| user.id.id() == playlist.owner.id.id())
+        .is_some_and(|user| Some(user.id.as_str()) == playlist.owner_id.as_deref())
     };
     let items: Vec<ListItem> = editable_playlists
       .iter()
@@ -386,12 +385,8 @@ fn draw_add_track_to_playlist_picker_dialog(f: &mut Frame<'_>, app: &App) {
         let label = if is_own_playlist(playlist) {
           playlist.name.clone()
         } else {
-          let owner = playlist
-            .owner
-            .display_name
-            .as_deref()
-            .unwrap_or_else(|| playlist.owner.id.id());
-          format!("{} - {} (collab)", playlist.name, owner)
+          // `owner` is the display name, falling back to the owner id.
+          format!("{} - {} (collab)", playlist.name, playlist.owner)
         };
         ListItem::new(Span::raw(label))
       })

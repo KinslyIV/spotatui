@@ -2,6 +2,7 @@ use super::common_key_events;
 use crate::core::app::{ActiveBlock, App, DialogContext};
 use crate::infra::network::IoEvent;
 use crate::tui::event::Key;
+use rspotify::model::idtypes::PlaylistId;
 
 pub fn handler(key: Key, app: &mut App) {
   let dialog_context = match app.get_current_route().active_block {
@@ -86,9 +87,15 @@ fn handle_add_to_playlist_picker(key: Key, app: &mut App) {
         let selected = app
           .playlist_picker_selected_index
           .min(playlist_count.saturating_sub(1));
-        if let Some(playlist) = editable_playlists.get(selected) {
+        // Re-parse the stored string id into an rspotify PlaylistId for the IoEvent.
+        let playlist_id = editable_playlists
+          .get(selected)
+          .and_then(|playlist| playlist.id.as_deref())
+          .and_then(|id| PlaylistId::from_id(id).ok())
+          .map(|id| id.into_static());
+        if let Some(playlist_id) = playlist_id {
           app.dispatch(IoEvent::AddTrackToPlaylist(
-            playlist.id.clone().into_static(),
+            playlist_id,
             pending_add.track_id,
           ));
         }
@@ -130,10 +137,11 @@ mod tests {
   use super::*;
   use crate::core::{
     app::{PendingPlaylistTrackAdd, RouteId},
-    test_helpers::{private_user, simplified_playlist},
+    pagination::Paged,
+    test_helpers::{playlist_info, user_info},
     user_config::UserConfig,
   };
-  use rspotify::model::{idtypes::TrackId, page::Page};
+  use rspotify::model::idtypes::TrackId;
   use rspotify::prelude::Id;
   use std::{sync::mpsc::channel, time::SystemTime};
 
@@ -157,20 +165,15 @@ mod tests {
   fn add_to_playlist_picker_dispatches_selected_editable_playlist() {
     let (tx, rx) = channel();
     let mut app = App::new(tx, UserConfig::new(), SystemTime::now());
-    app.user = Some(private_user("spotatui-owner"));
-    app.playlists = Some(Page {
-      href: "https://api.spotify.com/v1/me/playlists".to_string(),
-      items: vec![],
-      limit: 50,
-      next: None,
-      offset: 0,
-      previous: None,
+    app.user = Some(user_info("spotatui-owner"));
+    app.playlists = Some(Paged {
       total: 3,
+      ..Default::default()
     });
     app.all_playlists = vec![
-      simplified_playlist("37i9dQZF1DWZqd5JICZI0u", "Followed", "friend-owner", false),
-      simplified_playlist("37i9dQZF1DXcBWIGoYBM5M", "Owned", "spotatui-owner", false),
-      simplified_playlist(
+      playlist_info("37i9dQZF1DWZqd5JICZI0u", "Followed", "friend-owner", false),
+      playlist_info("37i9dQZF1DXcBWIGoYBM5M", "Owned", "spotatui-owner", false),
+      playlist_info(
         "37i9dQZF1DX4WYpdgoIcn6",
         "Collaborative",
         "friend-owner",

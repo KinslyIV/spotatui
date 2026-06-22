@@ -155,6 +155,10 @@ pub enum FormatType {
   Album(Box<SimplifiedAlbum>),
   Artist(Box<FullArtist>),
   Playlist(Box<SimplifiedPlaylist>),
+  /// Domain playlist (used by sources already migrated off rspotify, e.g. the
+  /// user's library playlists). The rspotify `Playlist` variant remains for
+  /// not-yet-migrated CLI paths (search results).
+  PlaylistInfo(Box<crate::core::plugin_api::PlaylistInfo>),
   Track(Box<FullTrack>),
   /// Domain track (used by sources already migrated off rspotify, e.g. the
   /// track table). The rspotify `Track` variant remains for not-yet-migrated
@@ -209,6 +213,9 @@ impl Format {
       FormatType::Playlist(p) => {
         let uri = p.id.uri();
         vec![Self::Playlist(p.name), Self::Uri(uri)]
+      }
+      FormatType::PlaylistInfo(p) => {
+        vec![Self::Playlist(p.name), Self::Uri(p.uri)]
       }
       FormatType::Track(t) => {
         let joined_artists = join_artists(t.artists.clone());

@@ -255,6 +255,35 @@ pub fn playable_info(item: &PlayableItem) -> Option<PlayableInfo> {
   }
 }
 
+/// Convert a page of `PlaylistItem` into a domain page of
+/// `(absolute_position, PlayableInfo)`. Each item's inner `track`
+/// (`Option<PlayableItem>`) is mapped via [`playable_info`]; items that are
+/// `None` or `Unknown` are dropped from the result, but their slot is still
+/// counted so the surviving items keep their **absolute playlist position**
+/// (`page.offset + raw slot index`). That position drives removal-by-position
+/// and play-from-here offsets, so it must reflect the real playlist index, not
+/// the compacted one. Paging metadata is copied straight from the source page.
+pub fn playlist_items_page(
+  page: &Page<rspotify::model::playlist::PlaylistItem>,
+) -> Paged<(u32, PlayableInfo)> {
+  Paged {
+    items: page
+      .items
+      .iter()
+      .enumerate()
+      .filter_map(|(idx, item)| {
+        let info = item.item.as_ref().and_then(playable_info)?;
+        Some((page.offset + idx as u32, info))
+      })
+      .collect(),
+    offset: page.offset,
+    limit: page.limit,
+    total: page.total,
+    next: page.next.clone(),
+    previous: page.previous.clone(),
+  }
+}
+
 // --- Search ----------------------------------------------------------------
 
 /// Assemble domain [`SearchResults`] from whichever rspotify result pages are
@@ -444,5 +473,52 @@ mod tests {
     for key in ["uri", "name", "artists", "album", "duration_ms"] {
       assert!(obj.contains_key(key), "missing contract key `{key}`");
     }
+  }
+
+  #[test]
+  #[allow(deprecated)] // PlaylistItem struct literal must set the deprecated `track` field
+  fn playlist_items_page_keeps_absolute_position_when_slots_are_dropped() {
+    use rspotify::model::playlist::PlaylistItem;
+
+    // A `None` slot before the second track must still advance the index so the
+    // surviving track keeps its true playlist position (removal-by-position
+    // depends on it).
+    let track_item = |id: &str| PlaylistItem {
+      added_at: None,
+      added_by: None,
+      is_local: false,
+      track: None,
+      item: Some(PlayableItem::Track(full_track(id, id))),
+    };
+    let empty_item = PlaylistItem {
+      added_at: None,
+      added_by: None,
+      is_local: false,
+      track: None,
+      item: None,
+    };
+
+    let page = Page {
+      href: String::new(),
+      items: vec![
+        track_item("4uLU6hMCjMI75M1A2tKUQC"), // raw index 0
+        empty_item,                           // raw index 1 (dropped)
+        track_item("1301WleyT98MSxVHPZCA6M"), // raw index 2
+      ],
+      limit: 20,
+      next: None,
+      offset: 40,
+      previous: None,
+      total: 43,
+    };
+
+    let mapped = playlist_items_page(&page);
+    // Two playables survive; positions reflect raw slots offset by the page offset.
+    assert_eq!(mapped.items.len(), 2);
+    assert_eq!(mapped.items[0].0, 40);
+    assert_eq!(mapped.items[1].0, 42);
+    // Paging metadata is copied verbatim.
+    assert_eq!(mapped.offset, 40);
+    assert_eq!(mapped.total, 43);
   }
 }
