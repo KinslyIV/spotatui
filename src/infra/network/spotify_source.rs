@@ -22,6 +22,15 @@
 //!   `Network` implementation works around this with a raw-JSON compat path
 //!   (see `library.rs`). Fix this before wiring `SpotifySource` live.
 //!   See: `src/infra/network/library.rs` → `get_current_user_playlists`.
+//! - `search()` uses `search_multiple`, which deserializes all five result
+//!   types (tracks/albums/artists/playlists/shows) in a single
+//!   `convert_result` call. If Spotify returns null fields in any category
+//!   (the playlist type is a known offender — see `search.rs` comments), the
+//!   entire search call fails rather than degrading gracefully per-category.
+//!   The existing `Network::get_search_results` isolates each type so that a
+//!   playlist parse failure leaves tracks/albums/artists intact. Fix before
+//!   wiring `SpotifySource` live: either replicate the per-type isolation or
+//!   use a raw JSON fallback for the playlist category.
 
 #![allow(dead_code)]
 
