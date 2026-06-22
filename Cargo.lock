@@ -2442,7 +2442,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.58.0",
 ]
 
 [[package]]
@@ -2979,7 +2979,7 @@ dependencies = [
 [[package]]
 name = "librespot-audio"
 version = "0.8.0"
-source = "git+https://github.com/LargeModGames/spotatui-librespot?branch=spotatui#28bcb231fe26f4db682eb85d1f7ae43aa1a83896"
+source = "git+https://github.com/LargeModGames/spotatui-librespot?rev=28bcb231fe26f4db682eb85d1f7ae43aa1a83896#28bcb231fe26f4db682eb85d1f7ae43aa1a83896"
 dependencies = [
  "aes",
  "bytes",
@@ -2998,7 +2998,7 @@ dependencies = [
 [[package]]
 name = "librespot-connect"
 version = "0.8.0"
-source = "git+https://github.com/LargeModGames/spotatui-librespot?branch=spotatui#28bcb231fe26f4db682eb85d1f7ae43aa1a83896"
+source = "git+https://github.com/LargeModGames/spotatui-librespot?rev=28bcb231fe26f4db682eb85d1f7ae43aa1a83896#28bcb231fe26f4db682eb85d1f7ae43aa1a83896"
 dependencies = [
  "futures-util",
  "librespot-core",
@@ -3017,7 +3017,7 @@ dependencies = [
 [[package]]
 name = "librespot-core"
 version = "0.8.0"
-source = "git+https://github.com/LargeModGames/spotatui-librespot?branch=spotatui#28bcb231fe26f4db682eb85d1f7ae43aa1a83896"
+source = "git+https://github.com/LargeModGames/spotatui-librespot?rev=28bcb231fe26f4db682eb85d1f7ae43aa1a83896#28bcb231fe26f4db682eb85d1f7ae43aa1a83896"
 dependencies = [
  "aes",
  "base64",
@@ -3073,7 +3073,7 @@ dependencies = [
 [[package]]
 name = "librespot-metadata"
 version = "0.8.0"
-source = "git+https://github.com/LargeModGames/spotatui-librespot?branch=spotatui#28bcb231fe26f4db682eb85d1f7ae43aa1a83896"
+source = "git+https://github.com/LargeModGames/spotatui-librespot?rev=28bcb231fe26f4db682eb85d1f7ae43aa1a83896#28bcb231fe26f4db682eb85d1f7ae43aa1a83896"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3090,7 +3090,7 @@ dependencies = [
 [[package]]
 name = "librespot-oauth"
 version = "0.8.0"
-source = "git+https://github.com/LargeModGames/spotatui-librespot?branch=spotatui#28bcb231fe26f4db682eb85d1f7ae43aa1a83896"
+source = "git+https://github.com/LargeModGames/spotatui-librespot?rev=28bcb231fe26f4db682eb85d1f7ae43aa1a83896#28bcb231fe26f4db682eb85d1f7ae43aa1a83896"
 dependencies = [
  "log",
  "oauth2",
@@ -3103,7 +3103,7 @@ dependencies = [
 [[package]]
 name = "librespot-playback"
 version = "0.8.0"
-source = "git+https://github.com/LargeModGames/spotatui-librespot?branch=spotatui#28bcb231fe26f4db682eb85d1f7ae43aa1a83896"
+source = "git+https://github.com/LargeModGames/spotatui-librespot?rev=28bcb231fe26f4db682eb85d1f7ae43aa1a83896#28bcb231fe26f4db682eb85d1f7ae43aa1a83896"
 dependencies = [
  "alsa 0.10.0",
  "cpal 0.16.0",
@@ -3135,7 +3135,7 @@ dependencies = [
 [[package]]
 name = "librespot-protocol"
 version = "0.8.0"
-source = "git+https://github.com/LargeModGames/spotatui-librespot?branch=spotatui#28bcb231fe26f4db682eb85d1f7ae43aa1a83896"
+source = "git+https://github.com/LargeModGames/spotatui-librespot?rev=28bcb231fe26f4db682eb85d1f7ae43aa1a83896#28bcb231fe26f4db682eb85d1f7ae43aa1a83896"
 dependencies = [
  "protobuf",
  "protobuf-codegen",
