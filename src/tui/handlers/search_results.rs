@@ -6,8 +6,7 @@ use crate::core::app::{
 use crate::infra::network::IoEvent;
 use crate::tui::event::Key;
 use rspotify::model::{
-  idtypes::{AlbumId, ArtistId, PlaylistId, ShowId, TrackId},
-  show::SimplifiedShow,
+  idtypes::{AlbumId, ArtistId, PlaylistId, TrackId},
   PlayableId,
 };
 
@@ -363,33 +362,10 @@ fn handle_enter_event_on_selected_block(app: &mut App) {
         &app.search_results.shows,
       ) {
         if let Some(show) = shows_result.items.get(index) {
-          if let Some(ref id_str) = show.id {
-            if let Ok(show_id) = ShowId::from_id(id_str.as_str()) {
-              // Reconstruct a minimal SimplifiedShow from the domain id.
-              // GetShowEpisodes uses show.id to fetch episodes and sets
-              // EpisodeTableContext::Simplified, which the episode table reads
-              // from app.library.show_episodes (populated by add_pages).
-              // Using GetShow would set EpisodeTableContext::Full but NOT populate
-              // show_episodes, resulting in a blank episode list.
-              #[allow(deprecated)]
-              let minimal_show = SimplifiedShow {
-                id: show_id.into_static(),
-                name: show.name.clone(),
-                description: show.description.clone(),
-                explicit: false,
-                external_urls: std::collections::HashMap::new(),
-                href: String::new(),
-                images: Vec::new(),
-                is_externally_hosted: None,
-                languages: Vec::new(),
-                media_type: String::new(),
-                copyrights: Vec::new(),
-                available_markets: Vec::new(),
-                publisher: String::new(),
-              };
-              app.dispatch(IoEvent::GetShowEpisodes(Box::new(minimal_show)));
-            }
-          }
+          // GetShowEpisodes populates app.library.show_episodes (GetShow sets
+          // EpisodeTableContext::Full but does NOT populate it, leaving a blank
+          // episode list). `show` is already a domain ShowInfo.
+          app.dispatch(IoEvent::GetShowEpisodes(Box::new(show.clone())));
         };
       }
     }

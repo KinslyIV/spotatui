@@ -531,7 +531,7 @@ mod tests {
     )
   }
 
-  fn saved_tracks_page(offset: u32, ids: &[&str], has_next: bool) -> Page<SavedTrack> {
+  fn saved_tracks_page(offset: u32, ids: &[&str], has_next: bool) -> Paged<TrackInfo> {
     saved_tracks_page_with_total(offset, ids, has_next, 4)
   }
 
@@ -540,8 +540,8 @@ mod tests {
     ids: &[&str],
     has_next: bool,
     total: u32,
-  ) -> Page<SavedTrack> {
-    Page {
+  ) -> Paged<TrackInfo> {
+    let rspotify_page = Page {
       href: "https://example.com/me/tracks".to_string(),
       items: ids
         .iter()
@@ -553,7 +553,8 @@ mod tests {
       offset,
       previous: None,
       total,
-    }
+    };
+    crate::infra::network::mapping::map_page(&rspotify_page, |st| TrackInfo::from(&st.track))
   }
 
   fn app_with_saved_tracks() -> (App, std::sync::mpsc::Receiver<IoEvent>) {
@@ -576,11 +577,7 @@ mod tests {
       false,
     );
     app.track_table.selected_index = 1;
-    app.track_table.tracks = page
-      .items
-      .iter()
-      .map(|item| TrackInfo::from(&item.track))
-      .collect();
+    app.track_table.tracks = page.items.iter().cloned().collect();
     app.library.saved_tracks.upsert_page_by_offset(page);
     app.library.saved_tracks.index = 0;
 
@@ -618,7 +615,7 @@ mod tests {
       .items
       .iter()
       .chain(second_page.items.iter())
-      .map(|item| TrackInfo::from(&item.track))
+      .cloned()
       .collect();
 
     let (uris, offset) = saved_tracks_playback_request(&app).unwrap();
@@ -655,7 +652,7 @@ mod tests {
       .items
       .iter()
       .chain(second_page.items.iter())
-      .map(|item| TrackInfo::from(&item.track))
+      .cloned()
       .collect();
 
     on_queue(&mut app);
@@ -744,11 +741,7 @@ mod tests {
       false,
     );
     app.track_table.selected_index = 1;
-    app.track_table.tracks = page
-      .items
-      .iter()
-      .map(|item| TrackInfo::from(&item.track))
-      .collect();
+    app.track_table.tracks = page.items.iter().cloned().collect();
     app.library.saved_tracks.upsert_page_by_offset(page);
     app.library.saved_tracks.index = 0;
 
@@ -783,11 +776,7 @@ mod tests {
       true,
     );
     app.track_table.selected_index = 1;
-    app.track_table.tracks = page
-      .items
-      .iter()
-      .map(|item| TrackInfo::from(&item.track))
-      .collect();
+    app.track_table.tracks = page.items.iter().cloned().collect();
     app.library.saved_tracks.upsert_page_by_offset(page);
     app.library.saved_tracks.index = 0;
 
@@ -813,11 +802,7 @@ mod tests {
       2,
     );
     app.track_table.selected_index = 1;
-    app.track_table.tracks = page
-      .items
-      .iter()
-      .map(|item| TrackInfo::from(&item.track))
-      .collect();
+    app.track_table.tracks = page.items.to_vec();
     app.library.saved_tracks.upsert_page_by_offset(page);
     app.library.saved_tracks.index = 0;
 
@@ -836,11 +821,7 @@ mod tests {
       true,
     );
     app.track_table.selected_index = 0;
-    app.track_table.tracks = page
-      .items
-      .iter()
-      .map(|item| TrackInfo::from(&item.track))
-      .collect();
+    app.track_table.tracks = page.items.to_vec();
     app.library.saved_tracks.upsert_page_by_offset(page);
     app.library.saved_tracks.index = 0;
 
@@ -878,11 +859,7 @@ mod tests {
     app.library.saved_tracks.add_pages(page);
     app.library.saved_tracks.index = 0;
     app.track_table.selected_index = 1;
-    app.track_table.tracks = app.library.saved_tracks.pages[0]
-      .items
-      .iter()
-      .map(|item| TrackInfo::from(&item.track))
-      .collect();
+    app.track_table.tracks = app.library.saved_tracks.pages[0].items.to_vec();
 
     let (uris, offset) = saved_tracks_playback_request(&app).unwrap();
 

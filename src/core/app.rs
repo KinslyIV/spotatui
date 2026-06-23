@@ -1,5 +1,7 @@
-use crate::core::pagination::Paged;
-use crate::core::plugin_api::{PlayableInfo, PlaylistInfo, TrackInfo};
+use crate::core::pagination::{CursorPaged, Paged};
+use crate::core::plugin_api::{
+  ArtistInfo, EpisodeInfo, PlayableInfo, PlaylistInfo, SavedAlbumInfo, ShowInfo, TrackInfo,
+};
 use crate::core::sort::{SortContext, SortField, SortOrder, SortState};
 use crate::core::user_config::{color_to_string, normalize_tick_rate_milliseconds, UserConfig};
 use crate::infra::network::sync::{PartySession, PartyStatus};
@@ -10,19 +12,14 @@ use ratatui::layout::Size;
 use rspotify::{
   model::enums::Country,
   model::{
-    album::SavedAlbum,
-    artist::FullArtist,
     context::CurrentPlaybackContext,
     device::DevicePayload,
     idtypes::{AlbumId, ArtistId, PlaylistId, ShowId, TrackId, UserId},
-    page::{CursorBasedPage, Page},
-    show::{FullShow, Show, SimplifiedEpisode, SimplifiedShow},
-    track::{FullTrack, SavedTrack},
+    track::FullTrack,
     PlayableItem,
   },
   prelude::*, // Adds Id trait for .id() method
 };
-use serde::de::DeserializeOwned;
 use std::cell::Cell;
 use std::sync::mpsc::Sender;
 #[cfg(any(feature = "streaming", all(feature = "mpris", target_os = "linux")))]
@@ -102,49 +99,10 @@ impl<T> ScrollableResultPages<T> {
   }
 }
 
-// Offset-keyed page caches are always kept sorted by page.offset, but the cache can be sparse.
-// Visible-page identity must be derived from page.offset, not raw cache index adjacency.
-impl<T: DeserializeOwned> ScrollableResultPages<Page<T>> {
-  pub fn page_index_for_offset(&self, offset: u32) -> Option<usize> {
-    self
-      .pages
-      .binary_search_by_key(&offset, |page| page.offset)
-      .ok()
-  }
-
-  pub fn upsert_page_by_offset(&mut self, new_page: Page<T>) -> usize {
-    let active_page_offset = self.pages.get(self.index).map(|page| page.offset);
-    let new_page_offset = new_page.offset;
-
-    match self
-      .pages
-      .binary_search_by_key(&new_page.offset, |page| page.offset)
-    {
-      Ok(index) => {
-        self.pages[index] = new_page;
-      }
-      Err(index) => {
-        self.pages.insert(index, new_page);
-      }
-    };
-
-    if let Some(active_page_offset) = active_page_offset {
-      if let Some(active_page_index) = self.page_index_for_offset(active_page_offset) {
-        self.index = active_page_index;
-      }
-    } else if !self.pages.is_empty() {
-      self.index = 0;
-    }
-
-    self
-      .page_index_for_offset(new_page_offset)
-      .expect("upserted page offset must exist in cache")
-  }
-}
-
-// Domain (`Paged<T>`) counterpart of the offset-keyed cache helpers above. The
-// page cache is kept sorted by `Paged::offset` and may be sparse, so visible-page
-// identity is derived from the offset, never raw cache adjacency.
+// Offset-keyed page caches are always kept sorted by `Paged::offset`, but the cache
+// can be sparse, so visible-page identity is derived from the offset, never raw
+// cache adjacency. There is no `DeserializeOwned` bound because `Paged` carries
+// already-mapped domain items.
 impl<T> ScrollableResultPages<Paged<T>> {
   pub fn page_index_for_offset(&self, offset: u32) -> Option<usize> {
     self
@@ -203,11 +161,11 @@ pub struct SpotifyResultAndSelectedIndex<T> {
 #[derive(Clone)]
 pub struct Library {
   pub selected_index: usize,
-  pub saved_tracks: ScrollableResultPages<Page<SavedTrack>>,
-  pub saved_albums: ScrollableResultPages<Page<SavedAlbum>>,
-  pub saved_shows: ScrollableResultPages<Page<Show>>,
-  pub saved_artists: ScrollableResultPages<CursorBasedPage<FullArtist>>,
-  pub show_episodes: ScrollableResultPages<Page<SimplifiedEpisode>>,
+  pub saved_tracks: ScrollableResultPages<Paged<TrackInfo>>,
+  pub saved_albums: ScrollableResultPages<Paged<SavedAlbumInfo>>,
+  pub saved_shows: ScrollableResultPages<Paged<ShowInfo>>,
+  pub saved_artists: ScrollableResultPages<CursorPaged<ArtistInfo>>,
+  pub show_episodes: ScrollableResultPages<Paged<EpisodeInfo>>,
 }
 
 #[derive(PartialEq, Debug)]
@@ -564,12 +522,12 @@ pub struct PendingPlaylistTrackRemoval {
 
 #[derive(Clone)]
 pub struct SelectedShow {
-  pub show: SimplifiedShow,
+  pub show: ShowInfo,
 }
 
 #[derive(Clone)]
 pub struct SelectedFullShow {
-  pub show: FullShow,
+  pub show: ShowInfo,
 }
 
 #[derive(Clone)]
@@ -2641,7 +2599,7 @@ impl App {
         break;
       }
 
-      tracks.extend(page.items.iter().map(|item| TrackInfo::from(&item.track)));
+      tracks.extend(page.items.iter().cloned());
       expected_offset = expected_offset.saturating_add(page.limit);
       active_index = page_index;
 
@@ -2907,14 +2865,8 @@ impl App {
       .copied()
   }
 
-  pub fn set_saved_artists_to_table(&mut self, saved_artists_page: &CursorBasedPage<FullArtist>) {
-    self.dispatch(IoEvent::SetArtistsToTable(
-      saved_artists_page
-        .items
-        .clone()
-        .into_iter()
-        .collect::<Vec<FullArtist>>(),
-    ))
+  pub fn set_saved_artists_to_table(&mut self, saved_artists_page: &CursorPaged<ArtistInfo>) {
+    self.artists = saved_artists_page.items.clone();
   }
 
   pub fn get_current_user_saved_artists_next(&mut self) {
@@ -2931,9 +2883,13 @@ impl App {
       None => {
         if let Some(saved_artists) = &self.library.saved_artists.clone().get_results(None) {
           if let Some(last_artist) = saved_artists.items.last() {
-            self.dispatch(IoEvent::GetFollowedArtists(Some(
-              last_artist.id.clone().into_static(),
-            )));
+            if let Some(after) = last_artist
+              .id
+              .as_deref()
+              .and_then(|id| ArtistId::from_id(id).ok())
+            {
+              self.dispatch(IoEvent::GetFollowedArtists(Some(after.into_static())));
+            }
           }
         }
       }
@@ -3088,8 +3044,14 @@ impl App {
       ActiveBlock::AlbumList => {
         if let Some(albums) = self.library.saved_albums.get_results(None) {
           if let Some(selected_album) = albums.items.get(self.album_list_index) {
-            let album_id = selected_album.album.id.clone();
-            self.dispatch(IoEvent::CurrentUserSavedAlbumDelete(album_id.into_static()));
+            if let Some(album_id) = selected_album
+              .album
+              .id
+              .as_deref()
+              .and_then(|id| AlbumId::from_id(id).ok())
+            {
+              self.dispatch(IoEvent::CurrentUserSavedAlbumDelete(album_id.into_static()));
+            }
           }
         }
       }
@@ -3203,11 +3165,13 @@ impl App {
       }
       ActiveBlock::AlbumList => {
         if let Some(artists) = self.library.saved_artists.get_results(None) {
-          if let Some(selected_artist) = artists.items.get(self.artists_list_index) {
-            self.dispatch(IoEvent::UserUnfollowArtists(vec![selected_artist
-              .id
-              .clone()
-              .into_static()]));
+          if let Some(artist_id) = artists
+            .items
+            .get(self.artists_list_index)
+            .and_then(|selected_artist| selected_artist.id.as_deref())
+            .and_then(|id| ArtistId::from_id(id).ok())
+          {
+            self.dispatch(IoEvent::UserUnfollowArtists(vec![artist_id.into_static()]));
           }
         }
       }
@@ -3344,33 +3308,45 @@ impl App {
           }
         }
       }
-      ActiveBlock::EpisodeTable => match self.episode_table_context {
-        EpisodeTableContext::Full => {
-          if let Some(selected_episode) = self.selected_show_full.clone() {
-            let show_id = selected_episode.show.id;
-            self.dispatch(IoEvent::CurrentUserSavedShowAdd(show_id.into_static()));
-          }
+      ActiveBlock::EpisodeTable => {
+        if let Some(show_id) = self.selected_episode_show_id() {
+          self.dispatch(IoEvent::CurrentUserSavedShowAdd(show_id));
         }
-        EpisodeTableContext::Simplified => {
-          if let Some(selected_episode) = self.selected_show_simplified.clone() {
-            let show_id = selected_episode.show.id;
-            self.dispatch(IoEvent::CurrentUserSavedShowAdd(show_id.into_static()));
-          }
-        }
-      },
+      }
       _ => (),
     }
+  }
+
+  /// Resolve the currently selected show's id (from the episode-table context)
+  /// back into an rspotify [`ShowId`]. Returns `None` if the stored domain show
+  /// has no id or it fails to parse.
+  fn selected_episode_show_id(&self) -> Option<ShowId<'static>> {
+    let id = match self.episode_table_context {
+      EpisodeTableContext::Full => self
+        .selected_show_full
+        .as_ref()
+        .and_then(|s| s.show.id.clone()),
+      EpisodeTableContext::Simplified => self
+        .selected_show_simplified
+        .as_ref()
+        .and_then(|s| s.show.id.clone()),
+    }?;
+    ShowId::from_id(id).ok().map(|id| id.into_static())
   }
 
   pub fn user_unfollow_show(&mut self, block: ActiveBlock) {
     info!("unfollowing show");
     match block {
       ActiveBlock::Podcasts => {
-        if let Some(shows) = self.library.saved_shows.get_results(None) {
-          if let Some(selected_show) = shows.items.get(self.shows_list_index) {
-            let show_id = selected_show.show.id.clone();
-            self.dispatch(IoEvent::CurrentUserSavedShowDelete(show_id.into_static()));
-          }
+        if let Some(show_id) = self
+          .library
+          .saved_shows
+          .get_results(None)
+          .and_then(|shows| shows.items.get(self.shows_list_index))
+          .and_then(|selected_show| selected_show.id.as_deref())
+          .and_then(|id| ShowId::from_id(id).ok())
+        {
+          self.dispatch(IoEvent::CurrentUserSavedShowDelete(show_id.into_static()));
         }
       }
       ActiveBlock::SearchResultBlock => {
@@ -3384,20 +3360,11 @@ impl App {
           }
         }
       }
-      ActiveBlock::EpisodeTable => match self.episode_table_context {
-        EpisodeTableContext::Full => {
-          if let Some(selected_episode) = self.selected_show_full.clone() {
-            let show_id = selected_episode.show.id;
-            self.dispatch(IoEvent::CurrentUserSavedShowDelete(show_id.into_static()));
-          }
+      ActiveBlock::EpisodeTable => {
+        if let Some(show_id) = self.selected_episode_show_id() {
+          self.dispatch(IoEvent::CurrentUserSavedShowDelete(show_id));
         }
-        EpisodeTableContext::Simplified => {
-          if let Some(selected_episode) = self.selected_show_simplified.clone() {
-            let show_id = selected_episode.show.id;
-            self.dispatch(IoEvent::CurrentUserSavedShowDelete(show_id.into_static()));
-          }
-        }
-      },
+      }
       _ => (),
     }
   }
@@ -4614,7 +4581,9 @@ mod tests {
   use super::*;
   use crate::core::test_helpers::{playlist_info, user_info};
   use chrono::{Duration as ChronoDuration, Utc};
-  use rspotify::model::{artist::SimplifiedArtist, idtypes::PlaylistId, SimplifiedAlbum};
+  use rspotify::model::{
+    artist::SimplifiedArtist, idtypes::PlaylistId, page::Page, track::SavedTrack, SimplifiedAlbum,
+  };
   use rspotify::prelude::Id;
   use std::collections::HashMap;
   use std::sync::mpsc::channel;
@@ -4713,6 +4682,18 @@ mod tests {
     }
   }
 
+  fn saved_tracks_domain_page(
+    offset: u32,
+    total: u32,
+    ids: &[&str],
+    has_next: bool,
+  ) -> Paged<TrackInfo> {
+    crate::infra::network::mapping::map_page(
+      &saved_tracks_page(offset, total, ids, has_next),
+      |st| TrackInfo::from(&st.track),
+    )
+  }
+
   fn empty_playlist_page(
     offset: u32,
     total: u32,
@@ -4763,14 +4744,14 @@ mod tests {
   #[test]
   fn upsert_page_by_offset_preserves_active_index() {
     let mut pages = ScrollableResultPages::new();
-    pages.add_pages(saved_tracks_page(
+    pages.add_pages(saved_tracks_domain_page(
       0,
       4,
       &["0000000000000000000001", "0000000000000000000002"],
       true,
     ));
 
-    let inserted_index = pages.upsert_page_by_offset(saved_tracks_page(
+    let inserted_index = pages.upsert_page_by_offset(saved_tracks_domain_page(
       2,
       4,
       &["0000000000000000000003", "0000000000000000000004"],
@@ -4785,14 +4766,14 @@ mod tests {
   #[test]
   fn upsert_page_by_offset_replaces_duplicate_page() {
     let mut pages = ScrollableResultPages::new();
-    pages.add_pages(saved_tracks_page(
+    pages.add_pages(saved_tracks_domain_page(
       0,
       2,
       &["0000000000000000000001", "0000000000000000000002"],
       false,
     ));
 
-    let replaced_index = pages.upsert_page_by_offset(saved_tracks_page(
+    let replaced_index = pages.upsert_page_by_offset(saved_tracks_domain_page(
       0,
       2,
       &["0000000000000000000003", "0000000000000000000004"],
@@ -4802,7 +4783,7 @@ mod tests {
     assert_eq!(replaced_index, 0);
     assert_eq!(pages.pages.len(), 1);
     assert_eq!(
-      pages.pages[0].items[0].track.id.as_ref().unwrap().id(),
+      pages.pages[0].items[0].id.as_deref().unwrap(),
       "0000000000000000000003"
     );
   }
@@ -4810,13 +4791,13 @@ mod tests {
   #[test]
   fn upsert_page_by_offset_keeps_active_page_when_inserting_before_it() {
     let mut pages = ScrollableResultPages::new();
-    pages.add_pages(saved_tracks_page(
+    pages.add_pages(saved_tracks_domain_page(
       0,
       6,
       &["0000000000000000000001", "0000000000000000000002"],
       true,
     ));
-    pages.add_pages(saved_tracks_page(
+    pages.add_pages(saved_tracks_domain_page(
       4,
       6,
       &["0000000000000000000005", "0000000000000000000006"],
@@ -4824,7 +4805,7 @@ mod tests {
     ));
     pages.index = 1;
 
-    let inserted_index = pages.upsert_page_by_offset(saved_tracks_page(
+    let inserted_index = pages.upsert_page_by_offset(saved_tracks_domain_page(
       2,
       6,
       &["0000000000000000000003", "0000000000000000000004"],
@@ -4841,12 +4822,16 @@ mod tests {
     let (tx, _rx) = channel();
     let mut app = App::new(tx, UserConfig::new(), SystemTime::now());
     app.saved_tracks_prefetch_generation = 7;
-    app.library.saved_tracks.add_pages(saved_tracks_page(
-      0,
-      2,
-      &["0000000000000000000001", "0000000000000000000002"],
-      false,
-    ));
+    let saved_tracks_domain_page = crate::infra::network::mapping::map_page(
+      &saved_tracks_page(
+        0,
+        2,
+        &["0000000000000000000001", "0000000000000000000002"],
+        false,
+      ),
+      |st| TrackInfo::from(&st.track),
+    );
+    app.library.saved_tracks.add_pages(saved_tracks_domain_page);
     app.track_table.tracks = vec![
       TrackInfo::from(&full_track("0000000000000000000001", "Track 1")),
       TrackInfo::from(&full_track("0000000000000000000002", "Track 2")),
