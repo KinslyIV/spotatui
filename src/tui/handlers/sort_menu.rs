@@ -6,6 +6,7 @@ use super::common_key_events;
 use crate::core::app::{ActiveBlock, App};
 use crate::core::sort::{SortContext, SortField};
 use crate::tui::event::Key;
+use rspotify::prelude::Id;
 
 /// Handle input when the sort menu is active
 pub fn handler(key: Key, app: &mut App) {
@@ -106,7 +107,11 @@ fn apply_sort(app: &mut App, field: SortField) {
     match ctx {
       SortContext::PlaylistTracks => {
         if let Some(playlist_id) = app.current_playlist_track_table_id() {
-          app.dispatch(crate::infra::network::IoEvent::FetchAllPlaylistTracksAndSort(playlist_id));
+          app.dispatch(
+            crate::infra::network::IoEvent::FetchAllPlaylistTracksAndSort(
+              playlist_id.id().to_string(),
+            ),
+          );
         }
       }
       SortContext::SavedAlbums => sort_saved_albums(app),
@@ -214,7 +219,6 @@ mod tests {
   use crate::core::user_config::UserConfig;
   use crate::infra::network::IoEvent;
   use rspotify::model::idtypes::PlaylistId;
-  use rspotify::prelude::Id;
   use std::sync::mpsc::channel;
   use std::time::SystemTime;
 
@@ -241,7 +245,7 @@ mod tests {
 
     match rx.recv().unwrap() {
       IoEvent::FetchAllPlaylistTracksAndSort(playlist_id) => {
-        assert_eq!(playlist_id.id(), search_playlist_id.id());
+        assert_eq!(playlist_id, search_playlist_id.id());
       }
       _ => panic!("expected playlist sort fetch"),
     }

@@ -854,7 +854,7 @@ impl LibraryNetwork for Network {
           if app.is_current_route_playlist_track_table_for(&playlist_id) {
             let playlist_offset = app.playlist_offset;
             app.dispatch(IoEvent::GetPlaylistItems(
-              playlist_id.clone(),
+              playlist_id.id().to_string(),
               playlist_offset,
             ));
           }

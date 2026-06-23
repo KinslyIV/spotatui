@@ -2,7 +2,6 @@ use super::common_key_events;
 use crate::core::app::{ActiveBlock, App, RecommendationsContext};
 use crate::infra::network::IoEvent;
 use crate::tui::event::Key;
-use rspotify::model::ArtistId;
 
 pub fn handler(key: Key, app: &mut App) {
   match key {
@@ -44,13 +43,9 @@ pub fn handler(key: Key, app: &mut App) {
     Key::Enter => {
       if let Some(artists) = app.library.saved_artists.get_results(None) {
         if let Some(artist) = artists.items.get(app.artists_list_index) {
-          if let Some(artist_id) = artist
-            .id
-            .as_deref()
-            .and_then(|id| ArtistId::from_id(id).ok())
-          {
+          if let Some(id) = artist.id.as_deref() {
             let artist_name = artist.name.clone();
-            app.get_artist(artist_id.into_static(), artist_name);
+            app.get_artist(id.to_string(), artist_name);
           }
         }
       }
@@ -59,18 +54,8 @@ pub fn handler(key: Key, app: &mut App) {
     Key::Char('e') => {
       if let Some(artists) = app.library.saved_artists.get_results(None) {
         if let Some(artist) = artists.items.get(app.artists_list_index) {
-          if let Some(artist_id) = artist
-            .id
-            .as_deref()
-            .and_then(|id| ArtistId::from_id(id).ok())
-          {
-            app.dispatch(IoEvent::StartPlayback(
-              Some(rspotify::model::PlayContextId::Artist(
-                artist_id.into_static(),
-              )),
-              None,
-              None,
-            ));
+          if let Some(uri) = artist.uri.clone() {
+            app.dispatch(IoEvent::StartPlayback(Some(uri), None, None));
           }
         }
       }

@@ -3,8 +3,6 @@ use crate::core::app::App;
 use crate::core::app::RecommendationsContext;
 use crate::infra::network::IoEvent;
 use crate::tui::event::Key;
-use rspotify::model::idtypes::PlayableId;
-use rspotify::model::TrackId;
 
 pub fn handler(key: Key, app: &mut App) {
   match key {
@@ -51,11 +49,7 @@ pub fn handler(key: Key, app: &mut App) {
       if let Some(recently_played_result) = &app.recently_played.result.clone() {
         if let Some(selected_track) = recently_played_result.items.get(app.recently_played.index) {
           if let Some(ref id_str) = selected_track.id {
-            if let Ok(track_id) = TrackId::from_id(id_str.as_str()) {
-              app.dispatch(IoEvent::ToggleSaveTrack(PlayableId::Track(
-                track_id.into_static(),
-              )));
-            }
+            app.dispatch(IoEvent::ToggleSaveTrack(id_str.clone()));
           };
         };
       };
@@ -70,16 +64,12 @@ pub fn handler(key: Key, app: &mut App) {
         // from `app.recently_played.index`.
         let mut remapped_offset: Option<usize> = None;
         let mut uri_index = 0usize;
-        let track_uris: Vec<PlayableId<'static>> = recently_played_result
+        let track_uris: Vec<String> = recently_played_result
           .items
           .iter()
           .enumerate()
           .filter_map(|(orig_index, item)| {
-            let playable = item
-              .id
-              .as_ref()
-              .and_then(|id_str| TrackId::from_id(id_str.as_str()).ok())
-              .map(|track_id| PlayableId::Track(track_id.into_static()));
+            let playable = item.uri.clone();
             if playable.is_some() {
               if orig_index == selected {
                 remapped_offset = Some(uri_index);
@@ -112,11 +102,7 @@ pub fn handler(key: Key, app: &mut App) {
       if let Some(recently_played_result) = &app.recently_played.result.clone() {
         if let Some(selected_track) = recently_played_result.items.get(app.recently_played.index) {
           if let Some(ref id_str) = selected_track.id {
-            if let Ok(track_id) = TrackId::from_id(id_str.as_str()) {
-              app.dispatch(IoEvent::AddItemToQueue(PlayableId::Track(
-                track_id.into_static(),
-              )));
-            }
+            app.dispatch(IoEvent::AddItemToQueue(id_str.clone()));
           };
         };
       };
@@ -133,12 +119,7 @@ fn open_add_to_playlist_for_selected_recent_track(app: &mut App) {
     return;
   };
 
-  let track_id = selected_track
-    .id
-    .as_ref()
-    .and_then(|id_str| TrackId::from_id(id_str.as_str()).ok())
-    .map(|id| id.into_static());
-  app.begin_add_track_to_playlist_flow(track_id, selected_track.name.clone());
+  app.begin_add_track_to_playlist_flow(selected_track.id.clone(), selected_track.name.clone());
 }
 
 #[cfg(test)]

@@ -754,9 +754,9 @@ impl PlaybackNetwork for Network {
                       duration_secs,
                     ));
 
-                    app.dispatch(IoEvent::CurrentUserSavedTracksContains(vec![track_id
-                      .clone()
-                      .into_static()]));
+                    app.dispatch(IoEvent::CurrentUserSavedTracksContains(vec![
+                      track_id_str.clone()
+                    ]));
                   }
 
                   app.last_track_id = Some(track_id_str);

@@ -3,7 +3,6 @@ use crate::core::app::ActiveBlock;
 use crate::core::app::{App, EpisodeTableContext};
 use crate::infra::network::IoEvent;
 use crate::tui::event::Key;
-use rspotify::model::{EpisodeId, PlayableId};
 
 pub fn handler(key: Key, app: &mut App) {
   match key {
@@ -70,18 +69,14 @@ fn on_enter(app: &mut App) {
     // Episodes without a parseable id are skipped, so the playback offset must
     // count only the kept rows up to the selected index (mirrors the saved-track
     // playback path); otherwise dropping an earlier row would shift the offset.
-    let mut episode_ids: Vec<PlayableId<'static>> = Vec::with_capacity(episodes.items.len());
+    let mut episode_ids: Vec<String> = Vec::with_capacity(episodes.items.len());
     let mut selected_offset = None;
     for (row_index, episode) in episodes.items.iter().enumerate() {
-      if let Some(id) = episode
-        .id
-        .as_deref()
-        .and_then(|id| EpisodeId::from_id(id).ok())
-      {
+      if let Some(uri) = episode.uri.clone() {
         if row_index == app.episode_list_index {
           selected_offset = Some(episode_ids.len());
         }
-        episode_ids.push(PlayableId::Episode(id.into_static()));
+        episode_ids.push(uri);
       }
     }
     app.dispatch(IoEvent::StartPlayback(

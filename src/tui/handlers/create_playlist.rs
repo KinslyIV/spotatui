@@ -1,7 +1,6 @@
 use crate::core::app::{App, CreatePlaylistFocus, CreatePlaylistStage};
 use crate::infra::network::IoEvent;
 use crate::tui::event::Key;
-use rspotify::model::idtypes::TrackId;
 use unicode_width::UnicodeWidthChar;
 
 pub fn handler(key: Key, app: &mut App) {
@@ -184,15 +183,10 @@ fn handle_added_tracks_nav(key: Key, app: &mut App) {
 
 fn submit_playlist(app: &mut App) {
   let name: String = app.create_playlist_name.iter().collect();
-  let track_ids: Vec<TrackId<'static>> = app
+  let track_ids: Vec<String> = app
     .create_playlist_tracks
     .iter()
-    .filter_map(|t| {
-      t.id
-        .as_deref()
-        .and_then(|id| TrackId::from_id(id).ok())
-        .map(|tid| tid.into_static())
-    })
+    .filter_map(|t| t.id.clone())
     .collect();
 
   app.dispatch(IoEvent::CreateNewPlaylist(name, track_ids));

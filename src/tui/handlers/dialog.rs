@@ -2,7 +2,6 @@ use super::common_key_events;
 use crate::core::app::{ActiveBlock, App, DialogContext};
 use crate::infra::network::IoEvent;
 use crate::tui::event::Key;
-use rspotify::model::idtypes::PlaylistId;
 
 pub fn handler(key: Key, app: &mut App) {
   let dialog_context = match app.get_current_route().active_block {
@@ -87,12 +86,9 @@ fn handle_add_to_playlist_picker(key: Key, app: &mut App) {
         let selected = app
           .playlist_picker_selected_index
           .min(playlist_count.saturating_sub(1));
-        // Re-parse the stored string id into an rspotify PlaylistId for the IoEvent.
         let playlist_id = editable_playlists
           .get(selected)
-          .and_then(|playlist| playlist.id.as_deref())
-          .and_then(|id| PlaylistId::from_id(id).ok())
-          .map(|id| id.into_static());
+          .and_then(|playlist| playlist.id.clone());
         if let Some(playlist_id) = playlist_id {
           app.dispatch(IoEvent::AddTrackToPlaylist(
             playlist_id,
@@ -141,8 +137,6 @@ mod tests {
     test_helpers::{playlist_info, user_info},
     user_config::UserConfig,
   };
-  use rspotify::model::idtypes::TrackId;
-  use rspotify::prelude::Id;
   use std::{sync::mpsc::channel, time::SystemTime};
 
   #[test]
@@ -181,9 +175,7 @@ mod tests {
       ),
     ];
     app.pending_playlist_track_add = Some(PendingPlaylistTrackAdd {
-      track_id: TrackId::from_id("0000000000000000000001")
-        .unwrap()
-        .into_static(),
+      track_id: "0000000000000000000001".to_string(),
       track_name: "Track".to_string(),
     });
     app.push_navigation_stack(
@@ -196,8 +188,8 @@ mod tests {
 
     match rx.recv().unwrap() {
       IoEvent::AddTrackToPlaylist(playlist_id, track_id) => {
-        assert_eq!(playlist_id.id(), "37i9dQZF1DXcBWIGoYBM5M");
-        assert_eq!(track_id.id(), "0000000000000000000001");
+        assert_eq!(playlist_id, "37i9dQZF1DXcBWIGoYBM5M");
+        assert_eq!(track_id, "0000000000000000000001");
       }
       _ => panic!("expected add-track event"),
     }

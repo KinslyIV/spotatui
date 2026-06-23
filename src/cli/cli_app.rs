@@ -6,10 +6,7 @@ use super::util::{Flag, Format, FormatType, JumpDirection, Type};
 use anyhow::{anyhow, Result};
 use rand::{thread_rng, Rng};
 use rspotify::model::{
-  context::CurrentPlaybackContext,
-  idtypes::{Id, PlayContextId, PlayableId},
-  playlist::FullPlaylist,
-  PlayableItem,
+  context::CurrentPlaybackContext, idtypes::Id, playlist::FullPlaylist, PlayableItem,
 };
 
 pub struct CliApp {
@@ -28,17 +25,13 @@ impl CliApp {
 
   async fn is_a_saved_track(&mut self, id: &str) -> bool {
     // Update the liked_song_ids_set
-    if let Ok(track_id) = rspotify::model::idtypes::TrackId::from_id(id) {
-      self
-        .net
-        .handle_network_event(IoEvent::CurrentUserSavedTracksContains(vec![
-          track_id.into_static()
-        ]))
-        .await;
-      self.net.app.lock().await.liked_song_ids_set.contains(id)
-    } else {
-      false
-    }
+    self
+      .net
+      .handle_network_event(IoEvent::CurrentUserSavedTracksContains(
+        vec![id.to_string()],
+      ))
+      .await;
+    self.net.app.lock().await.liked_song_ids_set.contains(id)
   }
 
   pub fn format_output(&self, mut format: String, values: Vec<Format>) -> String {
@@ -382,18 +375,14 @@ impl CliApp {
         if s && !self.is_a_saved_track(&id_string).await {
           self
             .net
-            .handle_network_event(IoEvent::ToggleSaveTrack(PlayableId::Track(
-              id.into_static(),
-            )))
+            .handle_network_event(IoEvent::ToggleSaveTrack(id.uri()))
             .await;
         // Want to dislike but is already disliked -> do nothing
         // Want to dislike and is liked currently -> remove like
         } else if !s && self.is_a_saved_track(&id_string).await {
           self
             .net
-            .handle_network_event(IoEvent::ToggleSaveTrack(PlayableId::Track(
-              id.into_static(),
-            )))
+            .handle_network_event(IoEvent::ToggleSaveTrack(id.uri()))
             .await;
         }
       }
@@ -519,59 +508,29 @@ impl CliApp {
       None
     };
 
+    // The network boundary reconstructs the typed rspotify id from the URI.
     if uri.contains("spotify:track:") {
-      let id_str = uri.split(':').next_back().unwrap();
-      if let Ok(track_id) = rspotify::model::idtypes::TrackId::from_id(id_str) {
-        let playable_id = PlayableId::Track(track_id.into_static());
-        if queue {
-          self
-            .net
-            .handle_network_event(IoEvent::AddItemToQueue(playable_id))
-            .await;
-        } else {
-          self
-            .net
-            .handle_network_event(IoEvent::StartPlayback(
-              None,
-              Some(vec![playable_id]),
-              Some(0),
-            ))
-            .await;
-        }
+      if queue {
+        self
+          .net
+          .handle_network_event(IoEvent::AddItemToQueue(uri))
+          .await;
+      } else {
+        self
+          .net
+          .handle_network_event(IoEvent::StartPlayback(None, Some(vec![uri]), Some(0)))
+          .await;
       }
-    } else {
+    } else if uri.contains("spotify:playlist:")
+      || uri.contains("spotify:album:")
+      || uri.contains("spotify:artist:")
+      || uri.contains("spotify:show:")
+    {
       // Context URIs (playlist, album, artist, show)
-      // Parse the URI: spotify:type:id
-      let parts: Vec<&str> = uri.split(':').collect();
-      if parts.len() >= 3 {
-        let id_str = parts[2];
-        let context_id = if uri.contains("spotify:playlist:") {
-          rspotify::model::idtypes::PlaylistId::from_id(id_str)
-            .ok()
-            .map(|id| PlayContextId::Playlist(id.into_static()))
-        } else if uri.contains("spotify:album:") {
-          rspotify::model::idtypes::AlbumId::from_id(id_str)
-            .ok()
-            .map(|id| PlayContextId::Album(id.into_static()))
-        } else if uri.contains("spotify:artist:") {
-          rspotify::model::idtypes::ArtistId::from_id(id_str)
-            .ok()
-            .map(|id| PlayContextId::Artist(id.into_static()))
-        } else if uri.contains("spotify:show:") {
-          rspotify::model::idtypes::ShowId::from_id(id_str)
-            .ok()
-            .map(|id| PlayContextId::Show(id.into_static()))
-        } else {
-          None
-        };
-
-        if let Some(context_id) = context_id {
-          self
-            .net
-            .handle_network_event(IoEvent::StartPlayback(Some(context_id), None, offset))
-            .await;
-        }
-      }
+      self
+        .net
+        .handle_network_event(IoEvent::StartPlayback(Some(uri), None, offset))
+        .await;
     }
   }
 

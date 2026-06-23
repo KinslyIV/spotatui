@@ -63,19 +63,18 @@ pub fn handler(key: Key, app: &mut App) {
               app.selected_playlist_index = Some(0);
             }
             PlaylistFolderItem::Playlist { index, .. } => {
-              // Open the playlist tracks. Re-parse the stored string id into an
-              // rspotify PlaylistId for the existing IoEvent payloads.
+              // Open the playlist tracks. The dispatch carries the string id; the
+              // app-state view still tracks an rspotify PlaylistId (deferred).
               let index = *index;
-              let playlist_id = app
-                .all_playlists
-                .get(index)
-                .and_then(|playlist| playlist.id.as_deref())
-                .and_then(|id| PlaylistId::from_id(id).ok())
-                .map(|id| id.into_static());
-              if let Some(playlist_id) = playlist_id {
-                app.active_playlist_index = Some(index);
-                app.reset_playlist_tracks_view(playlist_id.clone(), TrackTableContext::MyPlaylists);
-                app.dispatch(IoEvent::GetPlaylistItems(playlist_id, app.playlist_offset));
+              if let Some(id_str) = app.all_playlists.get(index).and_then(|p| p.id.clone()) {
+                if let Ok(playlist_id) = PlaylistId::from_id(id_str.as_str()) {
+                  app.active_playlist_index = Some(index);
+                  app.reset_playlist_tracks_view(
+                    playlist_id.into_static(),
+                    TrackTableContext::MyPlaylists,
+                  );
+                  app.dispatch(IoEvent::GetPlaylistItems(id_str, app.playlist_offset));
+                }
               }
             }
           }

@@ -6,10 +6,6 @@ use crate::core::app::{
 use crate::infra::network::IoEvent;
 use crate::tui::event::Key;
 use rand::{thread_rng, Rng};
-use rspotify::model::{
-  idtypes::{PlayContextId, PlaylistId, TrackId},
-  PlayableId,
-};
 use rspotify::prelude::Id;
 
 pub fn handler(key: Key, app: &mut App) {
@@ -147,11 +143,7 @@ fn open_add_to_playlist_dialog(app: &mut App) {
     None => return,
   };
 
-  let track_id = track
-    .id
-    .as_deref()
-    .and_then(|id| TrackId::from_id(id).ok())
-    .map(|id| id.into_static());
+  let track_id = track.id.clone();
   let track_name = track.name.clone();
   app.begin_add_track_to_playlist_flow(track_id, track_name);
 }
@@ -173,12 +165,7 @@ fn open_remove_from_playlist_dialog(app: &mut App) {
     None => return,
   };
 
-  let track_id = match track
-    .id
-    .as_deref()
-    .and_then(|id| TrackId::from_id(id).ok())
-    .map(|id| id.into_static())
-  {
+  let track_id = match track.id.clone() {
     Some(id) => id,
     None => {
       app.set_status_message("Track cannot be edited in playlist".to_string(), 4);
@@ -231,11 +218,11 @@ fn play_random_song(app: &mut App) {
       }
       TrackTableContext::RecommendedTracks => {}
       TrackTableContext::SavedTracks => {
-        let playable_ids: Vec<PlayableId<'static>> = app
+        let playable_ids: Vec<String> = app
           .track_table
           .tracks
           .iter()
-          .filter_map(|track| track_playable_id(track.id.as_deref()))
+          .filter_map(|track| track.uri.clone())
           .collect();
         if !playable_ids.is_empty() {
           let rand_idx = thread_rng().gen_range(0..playable_ids.len());
@@ -250,9 +237,9 @@ fn play_random_song(app: &mut App) {
       TrackTableContext::DiscoverPlaylist => {
         // Play random track from currently displayed discover playlist, but keep the full list
         // so next/previous can continue within the mix.
-        let mut playable_ids: Vec<PlayableId<'static>> = Vec::new();
+        let mut playable_ids: Vec<String> = Vec::new();
         for track in &app.track_table.tracks {
-          if let Some(playable_id) = track_playable_id(track.id.as_deref()) {
+          if let Some(playable_id) = track.uri.clone() {
             playable_ids.push(playable_id);
           }
         }
@@ -272,7 +259,7 @@ fn play_random_song(app: &mut App) {
 fn handle_save_track_event(app: &mut App) {
   let (selected_index, tracks) = (&app.track_table.selected_index, &app.track_table.tracks);
   if let Some(track) = tracks.get(*selected_index) {
-    if let Some(playable_id) = track_playable_id(track.id.as_deref()) {
+    if let Some(playable_id) = track.uri.clone() {
       app.dispatch(IoEvent::ToggleSaveTrack(playable_id));
     }
   };
@@ -313,7 +300,7 @@ fn on_enter(app: &mut App) {
       TrackTableContext::MyPlaylists | TrackTableContext::PlaylistSearch => {
         if let Some(track) = tracks.get(*selected_index) {
           // Get the track ID to play
-          let track_playable_id = track_playable_id(track.id.as_deref());
+          let track_playable_id = track.uri.clone();
           let context_id = current_playlist_context_id(app);
 
           // If we have a track ID, play it directly within the context
@@ -335,11 +322,11 @@ fn on_enter(app: &mut App) {
         };
       }
       TrackTableContext::RecommendedTracks => {
-        let mut playable_ids: Vec<PlayableId<'static>> = Vec::new();
+        let mut playable_ids: Vec<String> = Vec::new();
         let mut selected_offset: Option<usize> = None;
 
         for (idx, track) in tracks.iter().enumerate() {
-          if let Some(playable_id) = track_playable_id(track.id.as_deref()) {
+          if let Some(playable_id) = track.uri.clone() {
             if idx == *selected_index {
               selected_offset = Some(playable_ids.len());
             }
@@ -367,11 +354,11 @@ fn on_enter(app: &mut App) {
       TrackTableContext::AlbumSearch => {}
       TrackTableContext::DiscoverPlaylist => {
         // Play the selected track, but include the full discover list so playback can continue.
-        let mut playable_ids: Vec<PlayableId<'static>> = Vec::new();
+        let mut playable_ids: Vec<String> = Vec::new();
         let mut selected_offset: Option<usize> = None;
 
         for (idx, track) in tracks.iter().enumerate() {
-          if let Some(playable_id) = track_playable_id(track.id.as_deref()) {
+          if let Some(playable_id) = track.uri.clone() {
             if idx == *selected_index {
               selected_offset = Some(playable_ids.len());
             }
@@ -401,21 +388,21 @@ fn on_queue(app: &mut App) {
     match context {
       TrackTableContext::MyPlaylists | TrackTableContext::PlaylistSearch => {
         if let Some(track) = tracks.get(*selected_index) {
-          if let Some(playable_id) = track_playable_id(track.id.as_deref()) {
+          if let Some(playable_id) = track.uri.clone() {
             app.dispatch(IoEvent::AddItemToQueue(playable_id));
           }
         };
       }
       TrackTableContext::RecommendedTracks => {
         if let Some(track) = tracks.get(*selected_index) {
-          if let Some(playable_id) = track_playable_id(track.id.as_deref()) {
+          if let Some(playable_id) = track.uri.clone() {
             app.dispatch(IoEvent::AddItemToQueue(playable_id));
           }
         }
       }
       TrackTableContext::SavedTracks => {
         if let Some(track) = tracks.get(*selected_index) {
-          if let Some(playable_id) = track_playable_id(track.id.as_deref()) {
+          if let Some(playable_id) = track.uri.clone() {
             app.dispatch(IoEvent::AddItemToQueue(playable_id));
           }
         }
@@ -423,7 +410,7 @@ fn on_queue(app: &mut App) {
       TrackTableContext::AlbumSearch => {}
       TrackTableContext::DiscoverPlaylist => {
         if let Some(track) = tracks.get(*selected_index) {
-          if let Some(playable_id) = track_playable_id(track.id.as_deref()) {
+          if let Some(playable_id) = track.uri.clone() {
             app.dispatch(IoEvent::AddItemToQueue(playable_id));
           }
         }
@@ -436,23 +423,24 @@ fn jump_to_start(app: &mut App) {
   app.track_table.selected_index = 0;
 }
 
-fn current_playlist_id_static(app: &App) -> Option<PlaylistId<'static>> {
-  app.current_playlist_track_table_id()
+/// The active playlist's base62 id (from the playlist track-table context).
+fn current_playlist_id_static(app: &App) -> Option<String> {
+  app
+    .current_playlist_track_table_id()
+    .map(|id| id.id().to_string())
 }
 
-fn current_playlist_target_for_track_table_context(
-  app: &App,
-) -> Option<(PlaylistId<'static>, String)> {
+fn current_playlist_target_for_track_table_context(app: &App) -> Option<(String, String)> {
   let playlist_id = current_playlist_id_static(app)?;
   let playlist_name = playlist_name_for_id(app, &playlist_id)?;
   Some((playlist_id, playlist_name))
 }
 
-fn playlist_name_for_id(app: &App, playlist_id: &PlaylistId<'_>) -> Option<String> {
+fn playlist_name_for_id(app: &App, playlist_id: &str) -> Option<String> {
   app
     .all_playlists
     .iter()
-    .find(|playlist| playlist.id.as_deref() == Some(playlist_id.id()))
+    .find(|playlist| playlist.id.as_deref() == Some(playlist_id))
     .map(|playlist| playlist.name.clone())
     .or_else(|| {
       app
@@ -463,38 +451,27 @@ fn playlist_name_for_id(app: &App, playlist_id: &PlaylistId<'_>) -> Option<Strin
           playlists
             .items
             .iter()
-            .find(|playlist| playlist.id.as_deref() == Some(playlist_id.id()))
+            .find(|playlist| playlist.id.as_deref() == Some(playlist_id))
         })
         .map(|playlist| playlist.name.clone())
     })
 }
 
-fn current_playlist_context_id(app: &App) -> Option<PlayContextId<'static>> {
-  current_playlist_id_static(app).map(|playlist_id| playlist_context_id_from_ref(&playlist_id))
+/// The active playlist's `spotify:playlist:` context URI, for `StartPlayback`.
+fn current_playlist_context_id(app: &App) -> Option<String> {
+  app.current_playlist_track_table_id().map(|id| id.uri())
 }
 
 fn current_playlist_total_tracks(app: &App) -> Option<u32> {
   app.current_playlist_track_total()
 }
 
-fn playlist_context_id_from_ref(id: &PlaylistId<'_>) -> PlayContextId<'static> {
-  PlayContextId::Playlist(id.clone().into_static())
-}
-
-/// Re-parse a domain track id (base62 string) back into an rspotify
-/// [`PlayableId`] for dispatching playback/queue events. Returns `None` for
-/// missing or unparseable ids (e.g. local tracks).
-fn track_playable_id(id: Option<&str>) -> Option<PlayableId<'static>> {
-  let track_id = TrackId::from_id(id?).ok()?;
-  Some(PlayableId::Track(track_id.into_static()))
-}
-
-fn saved_tracks_playback_request(app: &App) -> Option<(Vec<PlayableId<'static>>, usize)> {
+fn saved_tracks_playback_request(app: &App) -> Option<(Vec<String>, usize)> {
   let mut playable_ids = Vec::with_capacity(app.track_table.tracks.len());
   let mut selected_playable_offset = None;
 
   for (row_index, track) in app.track_table.tracks.iter().enumerate() {
-    if let Some(playable_id) = track_playable_id(track.id.as_deref()) {
+    if let Some(playable_id) = track.uri.clone() {
       if row_index == app.track_table.selected_index {
         selected_playable_offset = Some(playable_ids.len());
       }
@@ -513,7 +490,7 @@ mod tests {
   use crate::core::test_helpers::full_track;
   use crate::core::user_config::UserConfig;
   use chrono::Utc;
-  use rspotify::model::{page::Page, track::SavedTrack};
+  use rspotify::model::{idtypes::PlaylistId, page::Page, track::SavedTrack};
   use std::sync::mpsc::channel;
   use std::time::SystemTime;
 
@@ -585,7 +562,7 @@ mod tests {
 
     assert_eq!(offset, 1);
     assert_eq!(uris.len(), 3);
-    assert_eq!(uris[offset].uri(), "spotify:track:0000000000000000000002");
+    assert_eq!(uris[offset], "spotify:track:0000000000000000000002");
   }
 
   #[test]
@@ -622,7 +599,7 @@ mod tests {
 
     assert_eq!(offset, 3);
     assert_eq!(uris.len(), 4);
-    assert_eq!(uris[offset].uri(), "spotify:track:0000000000000000000004");
+    assert_eq!(uris[offset], "spotify:track:0000000000000000000004");
   }
 
   #[test]
@@ -659,7 +636,7 @@ mod tests {
 
     match rx.recv().unwrap() {
       IoEvent::AddItemToQueue(playable_id) => {
-        assert_eq!(playable_id.uri(), "spotify:track:0000000000000000000004");
+        assert_eq!(playable_id, "spotify:track:0000000000000000000004");
       }
       other => panic!("unexpected event: {:?}", event_name(&other)),
     }
@@ -750,7 +727,7 @@ mod tests {
     match rx.recv().unwrap() {
       IoEvent::StartPlayback(None, Some(uris), Some(offset)) => {
         assert_eq!(offset, 1);
-        assert_eq!(uris[offset].uri(), "spotify:track:0000000000000000000002");
+        assert_eq!(uris[offset], "spotify:track:0000000000000000000002");
       }
       other => panic!("unexpected event: {:?}", event_name(&other)),
     }
@@ -865,7 +842,7 @@ mod tests {
 
     assert_eq!(offset, 1);
     assert_eq!(uris.len(), 2);
-    assert_eq!(uris[offset].uri(), "spotify:track:0000000000000000000002");
+    assert_eq!(uris[offset], "spotify:track:0000000000000000000002");
   }
 
   fn event_name(event: &IoEvent) -> &'static str {

@@ -37,8 +37,8 @@ mod track_table;
 use crate::core::app::{ActiveBlock, App, ArtistBlock, InputContext, RouteId, SearchResultBlock};
 use crate::infra::network::IoEvent;
 use crate::tui::event::Key;
-use rspotify::model::idtypes::PlaylistId;
 use rspotify::model::{context::CurrentPlaybackContext, PlayableItem};
+use rspotify::prelude::Id;
 
 pub use input::handler as input_handler;
 pub use mouse::handler as mouse_handler;
@@ -543,9 +543,7 @@ fn handle_jump_to_context(app: &mut App) {
         rspotify::model::enums::Type::Album => handle_jump_to_album(app),
         rspotify::model::enums::Type::Artist => handle_jump_to_artist_album(app),
         rspotify::model::enums::Type::Playlist => {
-          if let Ok(playlist_id) = PlaylistId::from_uri(&play_context.uri) {
-            app.dispatch(IoEvent::GetPlaylistItems(playlist_id.into_static(), 0));
-          }
+          app.dispatch(IoEvent::GetPlaylistItems(play_context.uri.clone(), 0));
         }
         _ => {}
       }
@@ -582,7 +580,7 @@ fn handle_jump_to_artist_album(app: &mut App) {
       PlayableItem::Track(track) => {
         if let Some(artist) = track.artists.first() {
           if let Some(artist_id) = &artist.id {
-            app.get_artist(artist_id.as_ref().into_static(), artist.name.clone());
+            app.get_artist(artist_id.id().to_string(), artist.name.clone());
           }
         }
       }
@@ -606,7 +604,7 @@ mod tests {
     device::DevicePayload,
     enums::{DeviceType, RepeatState},
     idtypes::PlaylistId,
-    CurrentlyPlayingType, Device, PlayableId, PlayableItem,
+    CurrentlyPlayingType, Device, PlayableItem,
   };
   use std::{
     sync::mpsc::{channel, TryRecvError},
@@ -739,8 +737,8 @@ mod tests {
     handle_app(Key::Char('F'), &mut app);
 
     match rx.recv().unwrap() {
-      IoEvent::ToggleSaveTrack(PlayableId::Track(track_id)) => {
-        assert_eq!(track_id, expected_track_id);
+      IoEvent::ToggleSaveTrack(track_id) => {
+        assert_eq!(track_id, expected_track_id.uri());
       }
       _ => panic!("unexpected event"),
     }

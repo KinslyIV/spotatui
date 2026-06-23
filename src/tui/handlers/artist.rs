@@ -2,10 +2,6 @@ use super::common_key_events;
 use crate::core::app::{ActiveBlock, App, ArtistBlock, RecommendationsContext};
 use crate::infra::network::IoEvent;
 use crate::tui::event::Key;
-use rspotify::model::{
-  idtypes::{AlbumId, ArtistId, TrackId},
-  PlayableId,
-};
 
 fn handle_down_press_on_selected_block(app: &mut App) {
   if let Some(artist) = &mut app.artist {
@@ -198,17 +194,11 @@ fn handle_enter_event_on_selected_block(app: &mut App) {
     match artist.artist_selected_block {
       ArtistBlock::TopTracks => {
         let selected_index = artist.selected_top_track_index;
-        // TrackInfo.id is Option<String>; re-parse to TrackId to build PlayableId.
-        let top_tracks: Vec<PlayableId<'static>> = artist
+        // TrackInfo.uri is the `spotify:track:` URI consumed by the dispatch boundary.
+        let top_tracks: Vec<String> = artist
           .top_tracks
           .iter()
-          .filter_map(|track| {
-            track
-              .id
-              .as_ref()
-              .and_then(|id| TrackId::from_id(id.as_str()).ok())
-              .map(|tid| PlayableId::Track(tid.into_static()))
-          })
+          .filter_map(|track| track.uri.clone())
           .collect();
         app.dispatch(IoEvent::StartPlayback(
           None,
@@ -223,13 +213,10 @@ fn handle_enter_event_on_selected_block(app: &mut App) {
           .get(artist.selected_album_index)
           .cloned()
         {
-          // AlbumInfo.id is Option<String>; re-parse to AlbumId to dispatch GetAlbum.
           // GetAlbum fetches a FullAlbum and sets AlbumTableContext::Full — do NOT
           // set track_table.context here, as GetAlbum does not use the track table.
           if let Some(id_str) = &selected_album.id {
-            if let Ok(album_id) = AlbumId::from_id(id_str.as_str()) {
-              app.dispatch(IoEvent::GetAlbum(album_id.into_static()));
-            }
+            app.dispatch(IoEvent::GetAlbum(id_str.clone()));
           }
         }
       }
@@ -237,11 +224,8 @@ fn handle_enter_event_on_selected_block(app: &mut App) {
         let selected_index = artist.selected_related_artist_index;
         let related = &artist.related_artists[selected_index];
         let artist_name = related.name.clone();
-        // ArtistInfo.id is Option<String>; re-parse to ArtistId to navigate.
         if let Some(id_str) = &related.id {
-          if let Ok(artist_id) = ArtistId::from_id(id_str.as_str()) {
-            app.get_artist(artist_id.into_static(), artist_name);
-          }
+          app.get_artist(id_str.clone(), artist_name);
         }
       }
       ArtistBlock::Empty => {}
@@ -337,13 +321,8 @@ pub fn handler(key: Key, app: &mut App) {
         if let Some(artist) = &app.artist {
           if let ArtistBlock::TopTracks = artist.artist_selected_block {
             if let Some(track) = artist.top_tracks.get(artist.selected_top_track_index) {
-              // TrackInfo.id is Option<String>; re-parse to TrackId for the IoEvent.
               if let Some(id_str) = &track.id {
-                if let Ok(track_id) = TrackId::from_id(id_str.as_str()) {
-                  app.dispatch(IoEvent::AddItemToQueue(PlayableId::Track(
-                    track_id.into_static(),
-                  )));
-                }
+                app.dispatch(IoEvent::AddItemToQueue(id_str.clone()));
               }
             };
           }
@@ -362,13 +341,7 @@ fn open_add_to_playlist_for_selected_top_track(app: &mut App) {
     return;
   };
 
-  // TrackInfo.id is Option<String>; re-parse to TrackId for the flow.
-  let track_id = track
-    .id
-    .as_ref()
-    .and_then(|id| TrackId::from_id(id.as_str()).ok())
-    .map(|tid| tid.into_static());
-  app.begin_add_track_to_playlist_flow(track_id, track.name.clone());
+  app.begin_add_track_to_playlist_flow(track.id.clone(), track.name.clone());
 }
 
 #[cfg(test)]

@@ -12,10 +12,7 @@ use ratatui::layout::Size;
 use rspotify::{
   model::enums::Country,
   model::{
-    context::CurrentPlaybackContext,
-    device::DevicePayload,
-    idtypes::{AlbumId, ArtistId, PlaylistId, ShowId, TrackId, UserId},
-    track::FullTrack,
+    context::CurrentPlaybackContext, device::DevicePayload, idtypes::PlaylistId, track::FullTrack,
     PlayableItem,
   },
   prelude::*, // Adds Id trait for .id() method
@@ -507,15 +504,18 @@ fn sort_playlist_track_matches(matches: &mut [(FullTrack, usize)], sort_state: S
 
 #[derive(Clone)]
 pub struct PendingPlaylistTrackAdd {
-  pub track_id: TrackId<'static>,
+  /// Track id/URI passed through to `AddTrackToPlaylist`.
+  pub track_id: String,
   pub track_name: String,
 }
 
 #[derive(Clone)]
 pub struct PendingPlaylistTrackRemoval {
-  pub playlist_id: PlaylistId<'static>,
+  /// Playlist id/URI passed through to `RemoveTrackFromPlaylistAtPosition`.
+  pub playlist_id: String,
   pub playlist_name: String,
-  pub track_id: TrackId<'static>,
+  /// Track id/URI passed through to `RemoveTrackFromPlaylistAtPosition`.
+  pub track_id: String,
   pub track_name: String,
   pub position: usize,
 }
@@ -1519,11 +1519,7 @@ impl App {
       .collect()
   }
 
-  pub fn begin_add_track_to_playlist_flow(
-    &mut self,
-    track_id: Option<TrackId<'static>>,
-    track_name: String,
-  ) {
+  pub fn begin_add_track_to_playlist_flow(&mut self, track_id: Option<String>, track_name: String) {
     let Some(track_id) = track_id else {
       self.set_status_message("Track cannot be added to playlist".to_string(), 4);
       return;
@@ -2030,21 +2026,9 @@ impl App {
     first_track: Option<TrackInfo>,
   ) {
     let user_country = self.get_user_country();
-    let seed_artist_ids = seed_artists.and_then(|ids| {
-      ids
-        .into_iter()
-        .map(|id| ArtistId::from_id(id).ok())
-        .collect()
-    });
-    let seed_track_ids = seed_tracks.and_then(|ids| {
-      ids
-        .into_iter()
-        .map(|id| TrackId::from_id(id).ok())
-        .collect()
-    });
     self.dispatch(IoEvent::GetRecommendationsForSeed(
-      seed_artist_ids,
-      seed_track_ids,
+      seed_artists,
+      seed_tracks,
       Box::new(first_track),
       user_country,
     ));
@@ -2052,12 +2036,7 @@ impl App {
 
   pub fn get_recommendations_for_track_id(&mut self, id: String) {
     let user_country = self.get_user_country();
-    if let Ok(track_id) = TrackId::from_id(id) {
-      self.dispatch(IoEvent::GetRecommendationsForTrackId(
-        track_id,
-        user_country,
-      ));
-    }
+    self.dispatch(IoEvent::GetRecommendationsForTrackId(id, user_country));
   }
 
   /// Returns the volume the UI should show and volume-up/down should use as a base.
@@ -2615,7 +2594,7 @@ impl App {
 
   pub fn set_playlist_tracks_to_table_continuous(&mut self) {
     let mut tracks: Vec<TrackInfo> = Vec::new();
-    let mut track_ids: Vec<TrackId<'static>> = Vec::new();
+    let mut track_ids: Vec<String> = Vec::new();
     let mut positions: Vec<usize> = Vec::new();
     let mut expected_offset = 0;
     let mut seen_offsets = HashSet::new();
@@ -2629,8 +2608,8 @@ impl App {
 
       for (position, item) in page.items.iter() {
         if let PlayableInfo::Track(track) = item {
-          if let Some(id) = track.id.as_ref().and_then(|id| TrackId::from_id(id).ok()) {
-            track_ids.push(id.into_static());
+          if let Some(id) = track.id.as_ref() {
+            track_ids.push(id.clone());
           }
           tracks.push(track.clone());
           positions.push(*position as usize);
@@ -2738,7 +2717,7 @@ impl App {
 
     let track_ids = matches
       .iter()
-      .filter_map(|(track, _)| track.id.clone().map(|id| id.into_static()))
+      .filter_map(|(track, _)| track.id.as_ref().map(|id| id.id().to_string()))
       .collect();
     let tracks: Vec<TrackInfo> = matches
       .iter()
@@ -2883,12 +2862,8 @@ impl App {
       None => {
         if let Some(saved_artists) = &self.library.saved_artists.clone().get_results(None) {
           if let Some(last_artist) = saved_artists.items.last() {
-            if let Some(after) = last_artist
-              .id
-              .as_deref()
-              .and_then(|id| ArtistId::from_id(id).ok())
-            {
-              self.dispatch(IoEvent::GetFollowedArtists(Some(after.into_static())));
+            if let Some(after) = last_artist.id.as_deref() {
+              self.dispatch(IoEvent::GetFollowedArtists(Some(after.to_string())));
             }
           }
         }
@@ -2950,7 +2925,10 @@ impl App {
         .contains(&next_offset)
       {
         self.playlist_tracks_prefetch_in_flight.insert(next_offset);
-        self.dispatch(IoEvent::GetPlaylistItems(playlist_id, next_offset));
+        self.dispatch(IoEvent::GetPlaylistItems(
+          playlist_id.id().to_string(),
+          next_offset,
+        ));
       }
     }
   }
@@ -3034,9 +3012,7 @@ impl App {
           if let Some(selected_index) = self.search_results.selected_album_index {
             let selected_album = &albums.items[selected_index];
             if let Some(ref id_str) = selected_album.id {
-              if let Ok(album_id) = AlbumId::from_id(id_str.as_str()) {
-                self.dispatch(IoEvent::CurrentUserSavedAlbumDelete(album_id.into_static()));
-              }
+              self.dispatch(IoEvent::CurrentUserSavedAlbumDelete(id_str.clone()));
             }
           }
         }
@@ -3044,13 +3020,8 @@ impl App {
       ActiveBlock::AlbumList => {
         if let Some(albums) = self.library.saved_albums.get_results(None) {
           if let Some(selected_album) = albums.items.get(self.album_list_index) {
-            if let Some(album_id) = selected_album
-              .album
-              .id
-              .as_deref()
-              .and_then(|id| AlbumId::from_id(id).ok())
-            {
-              self.dispatch(IoEvent::CurrentUserSavedAlbumDelete(album_id.into_static()));
+            if let Some(id) = selected_album.album.id.as_deref() {
+              self.dispatch(IoEvent::CurrentUserSavedAlbumDelete(id.to_string()));
             }
           }
         }
@@ -3059,9 +3030,7 @@ impl App {
         if let Some(artist) = &self.artist {
           if let Some(selected_album) = artist.albums.items.get(artist.selected_album_index) {
             if let Some(id_str) = &selected_album.id {
-              if let Ok(album_id) = AlbumId::from_id(id_str.as_str()) {
-                self.dispatch(IoEvent::CurrentUserSavedAlbumDelete(album_id.into_static()));
-              }
+              self.dispatch(IoEvent::CurrentUserSavedAlbumDelete(id_str.clone()));
             }
           }
         }
@@ -3078,9 +3047,7 @@ impl App {
           if let Some(selected_index) = self.search_results.selected_album_index {
             let selected_album = &albums.items[selected_index];
             if let Some(ref id_str) = selected_album.id {
-              if let Ok(album_id) = AlbumId::from_id(id_str.as_str()) {
-                self.dispatch(IoEvent::CurrentUserSavedAlbumAdd(album_id.into_static()));
-              }
+              self.dispatch(IoEvent::CurrentUserSavedAlbumAdd(id_str.clone()));
             }
           }
         }
@@ -3089,9 +3056,7 @@ impl App {
         if let Some(artist) = &self.artist {
           if let Some(selected_album) = artist.albums.items.get(artist.selected_album_index) {
             if let Some(id_str) = &selected_album.id {
-              if let Ok(album_id) = AlbumId::from_id(id_str.as_str()) {
-                self.dispatch(IoEvent::CurrentUserSavedAlbumAdd(album_id.into_static()));
-              }
+              self.dispatch(IoEvent::CurrentUserSavedAlbumAdd(id_str.clone()));
             }
           }
         }
@@ -3134,9 +3099,7 @@ impl App {
       None => {
         if let Some(show_episodes) = &self.library.show_episodes.get_results(None) {
           let offset = Some(show_episodes.offset + show_episodes.limit);
-          if let Ok(show_id) = ShowId::from_id(show_id) {
-            self.dispatch(IoEvent::GetCurrentShowEpisodes(show_id, offset));
-          }
+          self.dispatch(IoEvent::GetCurrentShowEpisodes(show_id, offset));
         }
       }
     }
@@ -3156,22 +3119,19 @@ impl App {
           if let Some(selected_index) = self.search_results.selected_artists_index {
             let selected_artist = &artists.items[selected_index];
             if let Some(ref id_str) = selected_artist.id {
-              if let Ok(artist_id) = ArtistId::from_id(id_str.as_str()) {
-                self.dispatch(IoEvent::UserUnfollowArtists(vec![artist_id.into_static()]));
-              }
+              self.dispatch(IoEvent::UserUnfollowArtists(vec![id_str.clone()]));
             }
           }
         }
       }
       ActiveBlock::AlbumList => {
         if let Some(artists) = self.library.saved_artists.get_results(None) {
-          if let Some(artist_id) = artists
+          if let Some(id) = artists
             .items
             .get(self.artists_list_index)
             .and_then(|selected_artist| selected_artist.id.as_deref())
-            .and_then(|id| ArtistId::from_id(id).ok())
           {
-            self.dispatch(IoEvent::UserUnfollowArtists(vec![artist_id.into_static()]));
+            self.dispatch(IoEvent::UserUnfollowArtists(vec![id.to_string()]));
           }
         }
       }
@@ -3179,9 +3139,7 @@ impl App {
         if let Some(artist) = &self.artist {
           let selected_artis = &artist.related_artists[artist.selected_related_artist_index];
           if let Some(id_str) = &selected_artis.id {
-            if let Ok(artist_id) = ArtistId::from_id(id_str.as_str()) {
-              self.dispatch(IoEvent::UserUnfollowArtists(vec![artist_id.into_static()]));
-            }
+            self.dispatch(IoEvent::UserUnfollowArtists(vec![id_str.clone()]));
           }
         }
       }
@@ -3197,9 +3155,7 @@ impl App {
           if let Some(selected_index) = self.search_results.selected_artists_index {
             let selected_artist = &artists.items[selected_index];
             if let Some(ref id_str) = selected_artist.id {
-              if let Ok(artist_id) = ArtistId::from_id(id_str.as_str()) {
-                self.dispatch(IoEvent::UserFollowArtists(vec![artist_id.into_static()]));
-              }
+              self.dispatch(IoEvent::UserFollowArtists(vec![id_str.clone()]));
             }
           }
         }
@@ -3208,9 +3164,7 @@ impl App {
         if let Some(artist) = &self.artist {
           let selected_artis = &artist.related_artists[artist.selected_related_artist_index];
           if let Some(id_str) = &selected_artis.id {
-            if let Ok(artist_id) = ArtistId::from_id(id_str.as_str()) {
-              self.dispatch(IoEvent::UserFollowArtists(vec![artist_id.into_static()]));
-            }
+            self.dispatch(IoEvent::UserFollowArtists(vec![id_str.clone()]));
           }
         }
       }
@@ -3229,22 +3183,18 @@ impl App {
       let selected_playlist = &playlists.items[selected_index];
       let selected_public = selected_playlist.public;
       if let Some(ref playlist_id_str) = selected_playlist.id {
-        if let Ok(playlist_id) = PlaylistId::from_id(playlist_id_str.as_str()) {
-          // owner_id carries the Spotify user id (populated in PlaylistInfo::from_simplified).
-          // The network handler ignores this param (_playlist_owner_id), so a fallback
-          // empty string is harmless — but we use the real id when available.
-          let owner_id_str = selected_playlist
-            .owner_id
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string());
-          if let Ok(owner_id) = UserId::from_id(owner_id_str.as_str()) {
-            self.dispatch(IoEvent::UserFollowPlaylist(
-              owner_id.into_static(),
-              playlist_id.into_static(),
-              selected_public,
-            ));
-          }
-        }
+        // owner_id carries the Spotify user id (populated in PlaylistInfo::from_simplified).
+        // The network handler ignores this param (_playlist_owner_id), so a fallback
+        // string is harmless — but we use the real id when available.
+        let owner_id = selected_playlist
+          .owner_id
+          .clone()
+          .unwrap_or_else(|| "unknown".to_string());
+        self.dispatch(IoEvent::UserFollowPlaylist(
+          owner_id,
+          playlist_id_str.clone(),
+          selected_public,
+        ));
       }
     }
   }
@@ -3255,12 +3205,10 @@ impl App {
       if let Some(PlaylistFolderItem::Playlist { index, .. }) =
         self.get_playlist_display_item_at(selected_index)
       {
-        // Re-parse the stored string ids into rspotify Ids for the IoEvent.
+        // Pass the stored string ids straight through to the IoEvent.
         let ids = self.all_playlists.get(*index).and_then(|playlist| {
-          let playlist_id = playlist.id.as_deref()?;
-          let selected_id = PlaylistId::from_id(playlist_id).ok()?.into_static();
-          let user_id = UserId::from_id(user.id.as_str()).ok()?.into_static();
-          Some((user_id, selected_id))
+          let selected_id = playlist.id.clone()?;
+          Some((user.id.clone(), selected_id))
         });
         if let Some((user_id, selected_id)) = ids {
           self.dispatch(IoEvent::UserUnfollowPlaylist(user_id, selected_id));
@@ -3278,16 +3226,12 @@ impl App {
     ) {
       let selected_playlist = &playlists.items[selected_index];
       // `user.id` is the domain string id (UserInfo) and `selected_playlist.id`
-      // is an Option<String> (PlaylistInfo); re-parse both into rspotify ids.
-      if let Ok(user_id) = UserId::from_id(user.id.as_str()) {
-        if let Some(ref id_str) = selected_playlist.id {
-          if let Ok(playlist_id) = PlaylistId::from_id(id_str.as_str()) {
-            self.dispatch(IoEvent::UserUnfollowPlaylist(
-              user_id.into_static(),
-              playlist_id.into_static(),
-            ));
-          }
-        }
+      // is an Option<String> (PlaylistInfo); both pass straight to the IoEvent.
+      if let Some(ref id_str) = selected_playlist.id {
+        self.dispatch(IoEvent::UserUnfollowPlaylist(
+          user.id.clone(),
+          id_str.clone(),
+        ));
       }
     }
   }
@@ -3300,9 +3244,7 @@ impl App {
           if let Some(selected_index) = self.search_results.selected_shows_index {
             if let Some(show) = shows.items.get(selected_index) {
               if let Some(ref id_str) = show.id {
-                if let Ok(show_id) = ShowId::from_id(id_str.as_str()) {
-                  self.dispatch(IoEvent::CurrentUserSavedShowAdd(show_id.into_static()));
-                }
+                self.dispatch(IoEvent::CurrentUserSavedShowAdd(id_str.clone()));
               }
             }
           }
@@ -3317,11 +3259,10 @@ impl App {
     }
   }
 
-  /// Resolve the currently selected show's id (from the episode-table context)
-  /// back into an rspotify [`ShowId`]. Returns `None` if the stored domain show
-  /// has no id or it fails to parse.
-  fn selected_episode_show_id(&self) -> Option<ShowId<'static>> {
-    let id = match self.episode_table_context {
+  /// Resolve the currently selected show's id/URI (from the episode-table
+  /// context). Returns `None` if the stored domain show has no id.
+  fn selected_episode_show_id(&self) -> Option<String> {
+    match self.episode_table_context {
       EpisodeTableContext::Full => self
         .selected_show_full
         .as_ref()
@@ -3330,32 +3271,28 @@ impl App {
         .selected_show_simplified
         .as_ref()
         .and_then(|s| s.show.id.clone()),
-    }?;
-    ShowId::from_id(id).ok().map(|id| id.into_static())
+    }
   }
 
   pub fn user_unfollow_show(&mut self, block: ActiveBlock) {
     info!("unfollowing show");
     match block {
       ActiveBlock::Podcasts => {
-        if let Some(show_id) = self
+        if let Some(id) = self
           .library
           .saved_shows
           .get_results(None)
           .and_then(|shows| shows.items.get(self.shows_list_index))
           .and_then(|selected_show| selected_show.id.as_deref())
-          .and_then(|id| ShowId::from_id(id).ok())
         {
-          self.dispatch(IoEvent::CurrentUserSavedShowDelete(show_id.into_static()));
+          self.dispatch(IoEvent::CurrentUserSavedShowDelete(id.to_string()));
         }
       }
       ActiveBlock::SearchResultBlock => {
         if let Some(shows) = &self.search_results.shows {
           if let Some(selected_index) = self.search_results.selected_shows_index {
             if let Some(ref id_str) = shows.items[selected_index].id {
-              if let Ok(show_id) = ShowId::from_id(id_str.as_str()) {
-                self.dispatch(IoEvent::CurrentUserSavedShowDelete(show_id.into_static()));
-              }
+              self.dispatch(IoEvent::CurrentUserSavedShowDelete(id_str.clone()));
             }
           }
         }
@@ -3426,7 +3363,7 @@ impl App {
     }
   }
 
-  pub fn get_artist(&mut self, artist_id: ArtistId<'static>, input_artist_name: String) {
+  pub fn get_artist(&mut self, artist_id: String, input_artist_name: String) {
     let user_country = self.get_user_country();
     self.dispatch(IoEvent::GetArtist(
       artist_id,
@@ -4582,7 +4519,11 @@ mod tests {
   use crate::core::test_helpers::{playlist_info, user_info};
   use chrono::{Duration as ChronoDuration, Utc};
   use rspotify::model::{
-    artist::SimplifiedArtist, idtypes::PlaylistId, page::Page, track::SavedTrack, SimplifiedAlbum,
+    artist::SimplifiedArtist,
+    idtypes::{PlaylistId, TrackId},
+    page::Page,
+    track::SavedTrack,
+    SimplifiedAlbum,
   };
   use rspotify::prelude::Id;
   use std::collections::HashMap;
@@ -4906,7 +4847,7 @@ mod tests {
 
     match rx.recv().unwrap() {
       IoEvent::GetPlaylistItems(id, offset) => {
-        assert_eq!(id.id(), playlist_id.id());
+        assert_eq!(id, playlist_id.id());
         assert_eq!(offset, 20);
       }
       _ => panic!("unexpected event"),
@@ -5160,11 +5101,7 @@ mod tests {
     )];
 
     app.begin_add_track_to_playlist_flow(
-      Some(
-        TrackId::from_id("0000000000000000000001")
-          .unwrap()
-          .into_static(),
-      ),
+      Some("0000000000000000000001".to_string()),
       "Track".to_string(),
     );
 

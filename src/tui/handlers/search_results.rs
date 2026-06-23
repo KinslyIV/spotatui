@@ -5,10 +5,7 @@ use crate::core::app::{
 };
 use crate::infra::network::IoEvent;
 use crate::tui::event::Key;
-use rspotify::model::{
-  idtypes::{AlbumId, ArtistId, PlaylistId, TrackId},
-  PlayableId,
-};
+use rspotify::model::idtypes::PlaylistId;
 
 fn handle_down_press_on_selected_block(app: &mut App) {
   // Start selecting within the selected block
@@ -272,12 +269,8 @@ fn handle_add_item_to_queue(app: &mut App) {
         &app.search_results.tracks,
       ) {
         if let Some(track) = tracks.items.get(index) {
-          if let Some(ref id_str) = track.id {
-            if let Ok(track_id) = TrackId::from_id(id_str.as_str()) {
-              app.dispatch(IoEvent::AddItemToQueue(PlayableId::Track(
-                track_id.into_static(),
-              )));
-            }
+          if let Some(uri) = track.uri.clone() {
+            app.dispatch(IoEvent::AddItemToQueue(uri));
           }
         }
       }
@@ -299,30 +292,21 @@ fn handle_enter_event_on_selected_block(app: &mut App) {
       ) {
         if let Some(album) = albums_result.items.get(index) {
           if let Some(ref id_str) = album.id {
-            if let Ok(album_id) = AlbumId::from_id(id_str.as_str()) {
-              app.track_table.context = Some(TrackTableContext::AlbumSearch);
-              app.dispatch(IoEvent::GetAlbum(album_id.into_static()));
-            }
+            app.track_table.context = Some(TrackTableContext::AlbumSearch);
+            app.dispatch(IoEvent::GetAlbum(id_str.clone()));
           }
         };
       }
     }
     SearchResultBlock::SongSearch => {
       let index = app.search_results.selected_tracks_index;
-      let track_ids: Option<Vec<PlayableId<'static>>> =
-        app.search_results.tracks.as_ref().map(|paged| {
-          paged
-            .items
-            .iter()
-            .filter_map(|track| {
-              track.id.as_ref().and_then(|id_str| {
-                TrackId::from_id(id_str.as_str())
-                  .ok()
-                  .map(|id| PlayableId::Track(id.into_static()))
-              })
-            })
-            .collect()
-        });
+      let track_ids: Option<Vec<String>> = app.search_results.tracks.as_ref().map(|paged| {
+        paged
+          .items
+          .iter()
+          .filter_map(|track| track.uri.clone())
+          .collect()
+      });
       app.dispatch(IoEvent::StartPlayback(None, track_ids, index));
     }
     SearchResultBlock::ArtistSearch => {
@@ -330,9 +314,7 @@ fn handle_enter_event_on_selected_block(app: &mut App) {
         if let Some(result) = &app.search_results.artists {
           if let Some(artist) = result.items.get(index) {
             if let Some(ref id_str) = artist.id {
-              if let Ok(artist_id) = ArtistId::from_id(id_str.as_str()) {
-                app.get_artist(artist_id.into_static(), artist.name.clone());
-              }
+              app.get_artist(id_str.clone(), artist.name.clone());
             }
           };
         };
@@ -346,11 +328,14 @@ fn handle_enter_event_on_selected_block(app: &mut App) {
         if let Some(playlist) = playlists_result.items.get(index) {
           if let Some(ref id_str) = playlist.id {
             if let Ok(playlist_id) = PlaylistId::from_id(id_str.as_str()) {
-              // Go to playlist tracks table
-              let playlist_id = playlist_id.into_static();
-              app
-                .reset_playlist_tracks_view(playlist_id.clone(), TrackTableContext::PlaylistSearch);
-              app.dispatch(IoEvent::GetPlaylistItems(playlist_id, app.playlist_offset));
+              // Go to playlist tracks table. The app-state view still tracks an
+              // rspotify PlaylistId (deferred); the dispatch carries the string id.
+              let id_owned = id_str.clone();
+              app.reset_playlist_tracks_view(
+                playlist_id.into_static(),
+                TrackTableContext::PlaylistSearch,
+              );
+              app.dispatch(IoEvent::GetPlaylistItems(id_owned, app.playlist_offset));
             }
           }
         };
@@ -587,12 +572,7 @@ fn open_add_to_playlist_for_selected_search_track(app: &mut App) {
     return;
   };
 
-  let track_id = track
-    .id
-    .as_ref()
-    .and_then(|id_str| TrackId::from_id(id_str.as_str()).ok())
-    .map(|id| id.into_static());
-  app.begin_add_track_to_playlist_flow(track_id, track.name.clone());
+  app.begin_add_track_to_playlist_flow(track.id.clone(), track.name.clone());
 }
 
 #[cfg(test)]

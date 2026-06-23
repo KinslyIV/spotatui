@@ -3,7 +3,7 @@ use crate::core::plugin_api::{AlbumInfo, ArtistInfo, PlaylistInfo, ShowInfo, Tra
 use crate::infra::network::mapping::map_page;
 use anyhow::anyhow;
 use rspotify::model::{
-  artist::FullArtist, enums::Country, idtypes::AlbumId, page::Page, playlist::SimplifiedPlaylist,
+  artist::FullArtist, enums::Country, page::Page, playlist::SimplifiedPlaylist,
   show::SimplifiedShow, track::FullTrack, SimplifiedAlbum,
 };
 use rspotify::prelude::*;
@@ -113,7 +113,7 @@ impl SearchNetwork for Network {
           item
             .artists
             .iter()
-            .filter_map(|artist| artist.id.as_ref().map(|id| id.to_owned().into_static()))
+            .filter_map(|artist| artist.id.as_ref().map(|id| id.id().to_string()))
         })
         .collect();
 
@@ -123,12 +123,7 @@ impl SearchNetwork for Network {
       let album_ids = album_results
         .items
         .iter()
-        .filter_map(|album| {
-          album
-            .id
-            .as_ref()
-            .map(|id| AlbumId::from_id(id.id()).unwrap().into_static())
-        })
+        .filter_map(|album| album.id.as_ref().map(|id| id.id().to_string()))
         .collect();
 
       // Check if these albums are saved
@@ -139,7 +134,7 @@ impl SearchNetwork for Network {
       let show_ids = show_results
         .items
         .iter()
-        .map(|show| show.id.clone().into_static())
+        .map(|show| show.id.id().to_string())
         .collect();
 
       // check if these shows are saved
