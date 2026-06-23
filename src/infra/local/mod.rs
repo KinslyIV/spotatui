@@ -8,6 +8,7 @@
 // Not yet wired into dispatch / UI.
 #![allow(dead_code)]
 
+pub mod dispatch;
 pub mod player;
 
 use std::path::{Path, PathBuf};

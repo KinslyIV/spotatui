@@ -607,6 +607,12 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
         .help("Rerun client authentication setup wizard"),
     )
     .arg(
+      Arg::new("play-file")
+        .long("play-file")
+        .value_name("PATH")
+        .help("Play a local audio file on startup (requires the local-files build feature)."),
+    )
+    .arg(
       Arg::new("completions")
         .long("completions")
         .help("Generates completions for your preferred shell")
@@ -817,6 +823,25 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
     user_config.clone(),
     token_expiry,
   )));
+
+  // `--play-file <PATH>`: queue a local file to start once the UI is up. The
+  // path is canonicalised to an absolute `file://` URI so the local-files
+  // dispatch can route it; an unreadable path is reported as a status message.
+  if let Some(path) = matches.get_one::<String>("play-file") {
+    match std::fs::canonicalize(path).ok().and_then(|abs| {
+      url::Url::from_file_path(abs)
+        .ok()
+        .map(|url| url.to_string())
+    }) {
+      Some(uri) => app.lock().await.pending_play_file = Some(uri),
+      None => {
+        app
+          .lock()
+          .await
+          .set_status_message(format!("Cannot find local file: {path}"), 8);
+      }
+    }
+  }
 
   // Work with the cli (not really async)
   if let Some(cmd) = matches.subcommand_name() {
@@ -1292,7 +1317,21 @@ async fn start_tokio(io_rx: std::sync::mpsc::Receiver<IoEvent>, network: &mut Ne
   loop {
     match io_rx.try_recv() {
       Ok(io_event) => {
-        network.handle_network_event(io_event).await;
+        // Local-file playback is intercepted before the Spotify network so the
+        // network stays Spotify-only (see infra::local::dispatch).
+        let handled_locally = {
+          #[cfg(feature = "local-files")]
+          {
+            crate::infra::local::dispatch::route_playback_event(&network.app, &io_event).await
+          }
+          #[cfg(not(feature = "local-files"))]
+          {
+            false
+          }
+        };
+        if !handled_locally {
+          network.handle_network_event(io_event).await;
+        }
       }
       Err(std::sync::mpsc::TryRecvError::Empty) => {
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;

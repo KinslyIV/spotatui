@@ -687,6 +687,23 @@ pub async fn start_ui(
           update_mpris_state(mpris, &mut mpris_state, &app);
         }
 
+        // Local-file playback drives its own progress from the rodio sink, and
+        // self-clears when the track plays to completion.
+        #[cfg(feature = "local-files")]
+        if app.is_local_playback_active {
+          if let Some(player) = app.local_player.clone() {
+            if player.is_finished() {
+              app.is_local_playback_active = false;
+              app.native_track_info = None;
+              app.native_is_playing = Some(false);
+              app.song_progress_ms = 0;
+              app.local_player = None; // drop releases the output device
+            } else {
+              app.song_progress_ms = player.position().as_millis();
+            }
+          }
+        }
+
         #[cfg(feature = "streaming")]
         if let Some(ref pos) = shared_position {
           if app.is_streaming_active {
@@ -750,6 +767,11 @@ pub async fn start_ui(
       }
       app.dispatch(IoEvent::FetchAnnouncements);
       app.help_docs_size = ui::help::get_help_docs(&app).len() as u32;
+
+      // `--play-file`: kick off local playback now that dispatch is wired.
+      if let Some(uri) = app.pending_play_file.take() {
+        app.dispatch(IoEvent::StartPlayback(Some(uri), None, None));
+      }
 
       #[cfg(feature = "scripting")]
       if let Some(engine) = script_engine.as_mut() {

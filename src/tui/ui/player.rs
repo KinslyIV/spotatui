@@ -749,7 +749,113 @@ fn draw_lyrics(f: &mut Frame<'_>, app: &App, area: Rect) {
   }
 }
 
+/// Render the playbar for an active local-file playback session.
+///
+/// Local playback has no Spotify `current_playback_context`, so it gets a
+/// dedicated render path driven entirely by [`App::native_track_info`] and
+/// [`App::song_progress_ms`] (no rspotify types involved).
+fn draw_local_playbar(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
+  let Some(native_info) = app.native_track_info.as_ref() else {
+    return;
+  };
+  let playbar_areas = playbar_layout_areas(app, layout_chunk);
+
+  let is_playing = app.native_is_playing.unwrap_or(true);
+  let play_title = if is_playing { "Playing" } else { "Paused" };
+
+  let current_route = app.get_current_route();
+  let highlight_state = (
+    matches!(
+      current_route.active_block,
+      ActiveBlock::PlayBar | ActiveBlock::MiniPlayer
+    ),
+    matches!(
+      current_route.hovered_block,
+      ActiveBlock::PlayBar | ActiveBlock::MiniPlayer
+    ),
+  );
+
+  let title = format!(
+    "{:-7} (Local | Volume: {:-2}%)",
+    play_title, app.user_config.behavior.volume_percent
+  );
+  let mut title_spans = vec![Span::styled(
+    title,
+    get_color(highlight_state, app.user_config.theme),
+  )];
+  if let Some(message) = app.status_message.as_ref() {
+    let msg_style = if app.status_message_is_error {
+      Style::default().fg(app.user_config.theme.error_text)
+    } else {
+      get_color(highlight_state, app.user_config.theme)
+    };
+    title_spans.push(Span::styled(format!(" | {}", message), msg_style));
+  }
+
+  let title_block = Block::default()
+    .borders(Borders::ALL)
+    .border_type(BorderType::Rounded)
+    .style(Style::default().bg(app.user_config.theme.playbar_background))
+    .title(Line::from(title_spans))
+    .border_style(get_color(highlight_state, app.user_config.theme));
+  f.render_widget(title_block, layout_chunk);
+
+  let lines = Text::from(Span::styled(
+    native_info.artists_display.clone(),
+    Style::default().fg(app.user_config.theme.playbar_text),
+  ));
+  let artist = Paragraph::new(lines)
+    .style(Style::default().fg(app.user_config.theme.playbar_text))
+    .block(
+      Block::default().title(Span::styled(
+        native_info.name.clone(),
+        Style::default()
+          .fg(app.user_config.theme.selected)
+          .add_modifier(Modifier::BOLD),
+      )),
+    );
+  f.render_widget(artist, playbar_areas.artist_area);
+
+  draw_playbar_controls(f, app, playbar_areas.controls_area);
+
+  let progress_ms = app.seek_ms.unwrap_or(app.song_progress_ms);
+  let duration_std = std::time::Duration::from_millis(native_info.duration_ms as u64);
+  let perc = get_track_progress_percentage(progress_ms, duration_std);
+  let song_progress_label = display_track_progress(progress_ms, duration_std);
+  let modifier = if app.user_config.behavior.enable_text_emphasis {
+    Modifier::ITALIC | Modifier::BOLD
+  } else {
+    Modifier::empty()
+  };
+  let song_progress = LineGauge::default()
+    .filled_style(
+      Style::default()
+        .fg(app.user_config.theme.playbar_progress)
+        .add_modifier(modifier),
+    )
+    .unfilled_style(
+      Style::default()
+        .fg(app.user_config.theme.playbar_background)
+        .add_modifier(modifier),
+    )
+    .ratio(perc as f64 / 100.0)
+    .filled_symbol("⣿")
+    .unfilled_symbol("⣉")
+    .label(Span::styled(
+      &song_progress_label,
+      Style::default().fg(app.user_config.theme.playbar_progress_text),
+    ));
+  f.render_widget(song_progress, playbar_areas.progress_area);
+}
+
 pub fn draw_playbar(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
+  // Local-file playback owns the session and has no Spotify context to render
+  // from, so it takes a dedicated path.
+  if app.is_local_playback_active {
+    draw_local_playbar(f, app, layout_chunk);
+    return;
+  }
+
   let playbar_areas = playbar_layout_areas(app, layout_chunk);
   let artist_area = playbar_areas.artist_area;
   let progress_area = playbar_areas.progress_area;
