@@ -72,7 +72,7 @@ pub trait UtilsNetwork {
 
 impl UtilsNetwork for Network {
   async fn get_lyrics(&mut self, track: String, artist: String, duration: f64) {
-    let client = reqwest::Client::new();
+    let client = super::requests::shared_http_client();
     let query = vec![
       ("track_name", track.clone()),
       ("artist_name", artist.clone()),
@@ -164,7 +164,7 @@ impl UtilsNetwork for Network {
   }
 
   async fn increment_global_song_count(&mut self) {
-    let client = reqwest::Client::new();
+    let client = super::requests::shared_http_client();
     // Fire and forget
     let _ = client
       .post(TELEMETRY_ENDPOINT)
@@ -175,7 +175,7 @@ impl UtilsNetwork for Network {
   }
 
   async fn fetch_global_song_count(&mut self) {
-    let client = reqwest::Client::new();
+    let client = super::requests::shared_http_client();
     match client
       .get(TELEMETRY_ENDPOINT)
       .header(reqwest::header::ACCEPT, "application/json")

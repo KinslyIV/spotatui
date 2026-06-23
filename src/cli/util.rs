@@ -2,9 +2,7 @@ use clap::ArgMatches;
 use rspotify::{
   model::enums::RepeatState,
   model::idtypes::Id,
-  model::{
-    artist::SimplifiedArtist, show::FullEpisode, track::FullTrack,
-  },
+  model::{artist::SimplifiedArtist, show::FullEpisode, track::FullTrack},
 };
 use std::time::Duration;
 

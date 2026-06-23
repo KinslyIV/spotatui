@@ -19,6 +19,20 @@ static SPOTIFY_API_PACING: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 const SPOTIFY_API_MIN_INTERVAL: Duration = Duration::from_millis(250);
 const SPOTIFY_API_BASE_URL: &str = "https://api.spotify.com/v1/";
 
+static SHARED_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+/// Returns the process-wide shared [`reqwest::Client`].
+///
+/// A `reqwest::Client` owns a connection pool and is meant to be built once and
+/// reused; building one per request (the previous behavior) discarded keep-alive
+/// connections and forced a fresh TLS handshake on every call. The client is
+/// internally reference-counted, so the returned `&'static` reference is shared
+/// cheaply across all request paths (Spotify API, friends relay, telemetry,
+/// lyrics).
+pub fn shared_http_client() -> &'static reqwest::Client {
+  SHARED_HTTP_CLIENT.get_or_init(reqwest::Client::new)
+}
+
 fn response_is_json(response: &reqwest::Response) -> bool {
   response
     .headers()
@@ -103,7 +117,7 @@ where
     }
   }
 
-  let client = reqwest::Client::new();
+  let client = shared_http_client();
   let mut attempt: u8 = 0;
   let max_attempts: u8 = 4;
   let mut refreshed_after_unauthorized = false;
