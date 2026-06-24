@@ -812,3 +812,55 @@ pub fn table_scroll_offset(selected_index: usize, visible_rows: usize) -> usize 
 
   selected_index.saturating_sub(visible_rows.saturating_sub(1))
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::core::plugin_api::PlaylistInfo;
+  use ratatui::{backend::TestBackend, Terminal};
+
+  fn rendered(app: &App, area: Rect) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal.draw(|f| draw_local_browser(f, app, area)).unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..area.height)
+      .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+      .filter_map(|(x, y)| buffer.cell((x, y)).map(|c| c.symbol().to_string()))
+      .collect()
+  }
+
+  fn folder(name: &str, track_count: u32) -> PlaylistInfo {
+    PlaylistInfo {
+      uri: format!("file:///music/{name}"),
+      name: name.to_string(),
+      owner: "local".to_string(),
+      track_count,
+      id: None,
+      owner_id: None,
+      collaborative: false,
+      public: None,
+      image_url: None,
+    }
+  }
+
+  #[test]
+  fn local_browser_lists_folders_with_track_counts() {
+    let mut app = App::default();
+    app.local_playlists = vec![folder("MyAlbum", 3)];
+    let content = rendered(&app, Rect::new(0, 0, 60, 6));
+    assert!(
+      content.contains("MyAlbum (3 tracks)"),
+      "folder name and track count should render: {content}"
+    );
+  }
+
+  #[test]
+  fn local_browser_empty_shows_config_hint() {
+    let app = App::default();
+    let content = rendered(&app, Rect::new(0, 0, 80, 6));
+    assert!(
+      content.contains("local_music_path"),
+      "empty browser should hint at the config key: {content}"
+    );
+  }
+}
