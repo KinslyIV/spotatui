@@ -1301,10 +1301,14 @@ impl App {
     user_config: UserConfig,
     spotify_token_expiry: SystemTime,
   ) -> App {
+    // Read the persisted active source before moving user_config into the struct,
+    // so the restored value overrides the Source::default() set by App::default().
+    let active_source = user_config.behavior.active_source;
     App {
       io_tx: Some(io_tx),
       user_config,
       spotify_token_expiry,
+      active_source,
       ..App::default()
     }
   }

@@ -54,6 +54,26 @@ impl Source {
     }
   }
 
+  /// Config-file token used to persist the active source.
+  /// Distinct from `label()` so the config key stays stable even if the
+  /// display name changes.
+  pub fn to_config_str(self) -> &'static str {
+    match self {
+      Source::Spotify => "Spotify",
+      Source::Local => "Local",
+    }
+  }
+
+  /// Parse the config-file token back to a `Source`.
+  /// Unknown strings fall back to `Spotify` so old or hand-edited configs
+  /// never break startup.
+  pub fn from_config_str(s: &str) -> Self {
+    match s {
+      "Local" => Source::Local,
+      _ => Source::Spotify,
+    }
+  }
+
   /// Whether this source can search its catalog (implements [`Searcher`]).
   pub fn supports_search(&self) -> bool {
     matches!(self, Source::Spotify)

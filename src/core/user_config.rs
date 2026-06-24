@@ -1,3 +1,4 @@
+use crate::core::source::Source;
 use crate::tui::event::Key;
 use anyhow::{anyhow, Result};
 use ratatui::style::{Color, Style};
@@ -736,6 +737,7 @@ pub struct BehaviorConfigString {
   pub announcement_feed_url: Option<String>,
   pub seen_announcement_ids: Option<Vec<String>>,
   pub shuffle_enabled: Option<bool>,
+  pub active_source: Option<String>,
   pub liked_icon: Option<String>,
   pub shuffle_icon: Option<String>,
   pub repeat_track_icon: Option<String>,
@@ -783,6 +785,8 @@ pub struct BehaviorConfig {
   pub announcement_feed_url: Option<String>,
   pub seen_announcement_ids: Vec<String>,
   pub shuffle_enabled: bool,
+  /// The last active source — persisted so it survives restarts.
+  pub active_source: Source,
   pub liked_icon: String,
   pub shuffle_icon: String,
   pub repeat_track_icon: String,
@@ -921,6 +925,7 @@ impl UserConfig {
         announcement_feed_url: None,
         seen_announcement_ids: Vec::new(),
         shuffle_enabled: false,
+        active_source: Source::default(),
         liked_icon: "♥".to_string(),
         shuffle_icon: "🔀".to_string(),
         repeat_track_icon: "🔂".to_string(),
@@ -1224,6 +1229,10 @@ impl UserConfig {
       self.behavior.shuffle_enabled = shuffle_enabled;
     }
 
+    if let Some(active_source_str) = behavior_config.active_source {
+      self.behavior.active_source = Source::from_config_str(&active_source_str);
+    }
+
     if let Some(visualizer_style) = behavior_config.visualizer_style {
       self.behavior.visualizer_style = visualizer_style;
     }
@@ -1448,6 +1457,7 @@ impl UserConfig {
       announcement_feed_url: self.behavior.announcement_feed_url.clone(),
       seen_announcement_ids: Some(self.behavior.seen_announcement_ids.clone()),
       shuffle_enabled: Some(self.behavior.shuffle_enabled),
+      active_source: Some(self.behavior.active_source.to_config_str().to_string()),
       liked_icon: Some(self.behavior.liked_icon.clone()),
       shuffle_icon: Some(self.behavior.shuffle_icon.clone()),
       repeat_track_icon: Some(self.behavior.repeat_track_icon.clone()),
@@ -1975,5 +1985,58 @@ mod tests {
     entries.insert("my_cmd".to_string(), "not-a-real-key".to_string());
     config.load_plugin_commands(entries);
     assert!(config.plugin_command_keys.is_empty());
+  }
+
+  #[test]
+  fn active_source_local_round_trips_through_config() {
+    use super::{BehaviorConfigString, UserConfig};
+    use crate::core::source::Source;
+
+    // "Local" in YAML deserialized and resolved → Source::Local
+    let behavior: BehaviorConfigString = serde_yaml::from_str("active_source: Local").unwrap();
+    assert_eq!(behavior.active_source, Some("Local".to_string()));
+
+    let mut config = UserConfig::new();
+    config.load_behaviorconfig(behavior).unwrap();
+    assert_eq!(config.behavior.active_source, Source::Local);
+  }
+
+  #[test]
+  fn active_source_missing_field_defaults_to_spotify() {
+    use super::{BehaviorConfigString, UserConfig};
+    use crate::core::source::Source;
+
+    // No active_source key in config → field is None → default Spotify preserved
+    let behavior: BehaviorConfigString = serde_yaml::from_str("{}").unwrap();
+    assert_eq!(behavior.active_source, None);
+
+    let mut config = UserConfig::new();
+    config.load_behaviorconfig(behavior).unwrap();
+    assert_eq!(config.behavior.active_source, Source::Spotify);
+  }
+
+  #[test]
+  fn active_source_unknown_string_falls_back_to_spotify() {
+    use crate::core::source::Source;
+
+    // Unknown/garbage strings must not panic and fall back to Spotify
+    assert_eq!(Source::from_config_str("Subsonic"), Source::Spotify);
+    assert_eq!(Source::from_config_str(""), Source::Spotify);
+    assert_eq!(Source::from_config_str("local"), Source::Spotify); // case-sensitive
+  }
+
+  #[test]
+  fn active_source_to_config_str_matches_from_config_str() {
+    use crate::core::source::Source;
+
+    // Round-trip: to_config_str → from_config_str must be identity for both variants
+    assert_eq!(
+      Source::from_config_str(Source::Spotify.to_config_str()),
+      Source::Spotify
+    );
+    assert_eq!(
+      Source::from_config_str(Source::Local.to_config_str()),
+      Source::Local
+    );
   }
 }

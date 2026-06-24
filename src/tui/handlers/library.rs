@@ -83,6 +83,11 @@ pub fn handler(key: Key, app: &mut App) {
       // source so the sidebar re-scopes to local folders, then opens the browser.
       7 => {
         app.active_source = Source::Local;
+        // Mirror the persisted value so the selection survives restarts.
+        app.user_config.behavior.active_source = Source::Local;
+        if let Err(e) = app.user_config.save_config() {
+          log::warn!("[source] failed to persist active_source: {e}");
+        }
         app.selected_playlist_index = Some(0);
         app.local_playlists_index = 0;
         app.dispatch(IoEvent::GetLocalPlaylists);

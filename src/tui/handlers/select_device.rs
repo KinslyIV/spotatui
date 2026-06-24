@@ -91,6 +91,11 @@ fn select_source(app: &mut App) {
   let source = Source::ALL[app.source_list_index];
   if app.active_source != source {
     app.active_source = source;
+    // Mirror the persisted value so it survives restarts.
+    app.user_config.behavior.active_source = source;
+    if let Err(e) = app.user_config.save_config() {
+      log::warn!("[source] failed to persist active_source: {e}");
+    }
     // Reset the sidebar playlist cursor to the top of the new source's list.
     app.selected_playlist_index = Some(0);
     if source == Source::Local {
