@@ -38,21 +38,14 @@ pub struct LocalPlaybackState {
   pub artists: String,
   pub album: String,
   pub duration_ms: u64,
-  /// Set while an auto-advance (`is_finished` → dispatch `NextTrack`) is in
-  /// flight. The runner tick fires far faster than the dispatched `NextTrack`
-  /// is processed, so without this guard the empty sink between "track ended"
-  /// and "next source appended" would dispatch `NextTrack` every tick and skip
-  /// several tracks per track-end. Same class of guard as the
+  /// Set while a track change (auto-advance *or* a manual Next/Previous) is
+  /// decoding. The runner tick fires far faster than the dispatched track
+  /// change is processed, so without this guard the empty sink between "track
+  /// ended / cleared" and "next source appended" would dispatch `NextTrack`
+  /// every tick and skip several tracks per change. Same class of guard as the
   /// "don't treat the pre-playback empty sink as end-of-track" invariant: it
-  /// covers the analogous advance-decode window.
+  /// covers the analogous mid-change decode window.
   pub advancing: bool,
-}
-
-impl LocalPlaybackState {
-  /// The URI of the currently playing track, if the index is in range.
-  pub fn current_uri(&self) -> Option<&str> {
-    self.queue.get(self.index).map(String::as_str)
-  }
 }
 
 /// The index of the track after `current` in a queue of `len` tracks, clamped
