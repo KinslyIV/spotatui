@@ -110,6 +110,53 @@ fn update_macos_metadata(
   last_metadata: &mut Option<MacosMetadata>,
   app: &App,
 ) {
+  // Local-file playback owns its own state and never populates the Spotify
+  // playback context, so Now Playing must read metadata, play state, and
+  // position straight from the live local player when local is active.
+  #[cfg(feature = "local-files")]
+  if let Some(local) = app.local_playback.as_ref() {
+    use crate::infra::media_metadata::{select_media_metadata, LocalMediaMetadata};
+
+    let is_playing = !local.player.is_paused();
+    let position_ms = local.player.position().as_millis() as u64;
+
+    // `select_media_metadata` is the single, unit-tested decision for which
+    // source the OS integration follows; local always wins while it is active.
+    let metadata = select_media_metadata(
+      Some(LocalMediaMetadata {
+        title: local.name.clone(),
+        artists: vec![local.artists.clone()],
+        album: local.album.clone(),
+        duration_ms: local.duration_ms as u32,
+      }),
+      None,
+    )
+    .expect("local metadata is present");
+
+    let new_metadata = MacosMetadata {
+      title: metadata.title.clone(),
+      artists: metadata.artists.clone(),
+      album: metadata.album.clone(),
+      duration_ms: metadata.duration_ms,
+      art_url: metadata.image_url.clone(),
+    };
+
+    if last_metadata.as_ref() != Some(&new_metadata) {
+      manager.set_metadata(
+        &metadata.title,
+        &metadata.artists,
+        &metadata.album,
+        metadata.duration_ms,
+        metadata.image_url,
+      );
+      *last_metadata = Some(new_metadata);
+    }
+
+    manager.set_playback_status(is_playing);
+    manager.set_position(position_ms);
+    return;
+  }
+
   if let Some(snapshot) = crate::infra::media_metadata::current_playback_snapshot(app) {
     let new_metadata = MacosMetadata {
       title: snapshot.metadata.title.clone(),
@@ -1361,6 +1408,17 @@ async fn handle_mpris_events(
     if !app.lock().await.user_config.behavior.enable_media_keys {
       continue;
     }
+
+    // Local-file playback owns the session: route transport through the same
+    // IoEvents the keyboard uses (intercepted by route_local_event before the
+    // Spotify network) so media keys follow local instead of librespot. This
+    // must run *before* the streaming-player branches below, since librespot is
+    // initialized even while a local file is playing.
+    #[cfg(feature = "local-files")]
+    if route_local_mpris_event(&event, &app, &mpris_manager).await {
+      continue;
+    }
+
     match event {
       MprisEvent::PlayPause => {
         #[cfg(feature = "streaming")]
@@ -1539,6 +1597,77 @@ async fn handle_mpris_events(
   }
 }
 
+/// Route an MPRIS transport event through the standard local-playback dispatch
+/// path when a local file owns the session.
+///
+/// Returns `true` if the event was handled locally (and the caller must skip
+/// the Spotify/librespot branches). Play/pause/next/previous/stop/seek map onto
+/// the same `IoEvent`s the keyboard uses; `route_local_event` intercepts them
+/// before the Spotify network. Non-transport events (shuffle/loop) return
+/// `false` so existing behaviour is preserved.
+#[cfg(all(feature = "mpris", target_os = "linux", feature = "local-files"))]
+async fn route_local_mpris_event(
+  event: &mpris::MprisEvent,
+  app: &Arc<Mutex<App>>,
+  mpris_manager: &Arc<mpris::MprisManager>,
+) -> bool {
+  use mpris::MprisEvent;
+
+  let mut app_lock = app.lock().await;
+  // Read the live local player state up front, then drop the borrow so the
+  // immutable read does not conflict with the `&mut self` dispatch calls below.
+  let Some(local) = app_lock.local_playback.as_ref() else {
+    return false;
+  };
+  let is_paused = local.player.is_paused();
+  let position_ms = local.player.position().as_millis() as i64;
+
+  match event {
+    MprisEvent::PlayPause => {
+      if is_paused {
+        app_lock.dispatch(IoEvent::StartPlayback(None, None, None));
+      } else {
+        app_lock.dispatch(IoEvent::PausePlayback);
+      }
+      true
+    }
+    MprisEvent::Play => {
+      app_lock.dispatch(IoEvent::StartPlayback(None, None, None));
+      true
+    }
+    MprisEvent::Pause | MprisEvent::Stop => {
+      app_lock.dispatch(IoEvent::PausePlayback);
+      true
+    }
+    MprisEvent::Next => {
+      app_lock.dispatch(IoEvent::NextTrack);
+      true
+    }
+    MprisEvent::Previous => {
+      app_lock.dispatch(IoEvent::PreviousTrack);
+      true
+    }
+    MprisEvent::Seek(offset_micros) => {
+      let offset_ms = offset_micros / 1000;
+      let new_position_ms = (position_ms + offset_ms).max(0) as u32;
+      app_lock.dispatch(IoEvent::Seek(new_position_ms));
+      drop(app_lock);
+      mpris_manager.emit_seeked(new_position_ms as u64);
+      true
+    }
+    MprisEvent::SetPosition(position_micros) => {
+      let new_position_ms = (position_micros / 1000).max(0) as u32;
+      app_lock.dispatch(IoEvent::Seek(new_position_ms));
+      drop(app_lock);
+      mpris_manager.emit_seeked(new_position_ms as u64);
+      true
+    }
+    // Shuffle/loop don't apply to single-file local playback; leave them to the
+    // existing Spotify-targeted handling.
+    MprisEvent::SetShuffle(_) | MprisEvent::SetLoopStatus(_) => false,
+  }
+}
+
 /// Handle macOS media events from external sources (media keys, Control Center, AirPods, etc.)
 /// Routes control requests to the native streaming player
 #[cfg(all(feature = "macos-media", target_os = "macos"))]
@@ -1554,6 +1683,17 @@ async fn handle_macos_media_events(
     if !app.lock().await.user_config.behavior.enable_media_keys {
       continue;
     }
+
+    // Local-file playback owns the session: route transport through the same
+    // IoEvents the keyboard uses (intercepted by route_local_event before the
+    // Spotify network) so media keys follow local instead of librespot. This
+    // must run *before* `active_streaming_player` below, since librespot stays
+    // active even while a local file is playing.
+    #[cfg(feature = "local-files")]
+    if route_local_macos_event(&event, &app).await {
+      continue;
+    }
+
     let Some(player) = player::active_streaming_player(&app).await else {
       continue;
     };
@@ -1590,6 +1730,52 @@ async fn handle_macos_media_events(
       }
     }
   }
+}
+
+/// Route a macOS media transport event through the standard local-playback
+/// dispatch path when a local file owns the session.
+///
+/// Returns `true` if the event was handled locally (and the caller must skip
+/// the streaming-player branches). Play/pause/next/previous/stop map onto the
+/// same `IoEvent`s the keyboard uses; `route_local_event` intercepts them
+/// before the Spotify network.
+#[cfg(all(feature = "macos-media", target_os = "macos", feature = "local-files"))]
+async fn route_local_macos_event(
+  event: &macos_media::MacMediaEvent,
+  app: &Arc<Mutex<App>>,
+) -> bool {
+  use macos_media::MacMediaEvent;
+
+  let mut app_lock = app.lock().await;
+  // Read the live local player state up front, then drop the borrow so the
+  // immutable read does not conflict with the `&mut self` dispatch calls below.
+  let Some(local) = app_lock.local_playback.as_ref() else {
+    return false;
+  };
+  let is_paused = local.player.is_paused();
+
+  match event {
+    MacMediaEvent::PlayPause => {
+      if is_paused {
+        app_lock.dispatch(IoEvent::StartPlayback(None, None, None));
+      } else {
+        app_lock.dispatch(IoEvent::PausePlayback);
+      }
+    }
+    MacMediaEvent::Play => {
+      app_lock.dispatch(IoEvent::StartPlayback(None, None, None));
+    }
+    MacMediaEvent::Pause | MacMediaEvent::Stop => {
+      app_lock.dispatch(IoEvent::PausePlayback);
+    }
+    MacMediaEvent::Next => {
+      app_lock.dispatch(IoEvent::NextTrack);
+    }
+    MacMediaEvent::Previous => {
+      app_lock.dispatch(IoEvent::PreviousTrack);
+    }
+  }
+  true
 }
 
 #[cfg(all(feature = "windows-media", target_os = "windows"))]

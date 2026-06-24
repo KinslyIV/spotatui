@@ -190,6 +190,63 @@ fn image_url_from_context_item(item: Option<&PlayableItem>) -> Option<String> {
   }
 }
 
+/// Static metadata for an active local-files playback session, decoupled from
+/// the live [`crate::infra::local::LocalPlaybackState`] (which embeds an audio
+/// device that cannot be constructed in a headless test). Used to drive the OS
+/// media integrations (MPRIS / macOS Now Playing) when a local file owns the
+/// playback session.
+///
+/// Compiled only when both the local-files source and an OS media integration
+/// that consumes it (MPRIS on Linux, Now Playing on macOS) are enabled, so
+/// other combos (e.g. local-files + discord-rpc alone) stay free of dead-code
+/// warnings under `-D warnings`.
+#[cfg(all(
+  feature = "local-files",
+  any(
+    all(feature = "mpris", target_os = "linux"),
+    all(feature = "macos-media", target_os = "macos")
+  )
+))]
+#[derive(Clone, Debug, PartialEq)]
+pub struct LocalMediaMetadata {
+  pub title: String,
+  pub artists: Vec<String>,
+  pub album: String,
+  pub duration_ms: u32,
+}
+
+/// Choose the metadata the OS media integration should display.
+///
+/// When a local file owns the playback session (`local` is `Some`), its static
+/// metadata wins so media keys / Now Playing follow local playback instead of
+/// the stale Spotify context. Otherwise the Spotify-derived `spotify` metadata
+/// (if any) is used.
+///
+/// This is a pure function over plain fields so it is unit-testable without a
+/// live D-Bus connection or an audio device.
+#[cfg(all(
+  feature = "local-files",
+  any(
+    all(feature = "mpris", target_os = "linux"),
+    all(feature = "macos-media", target_os = "macos")
+  )
+))]
+pub fn select_media_metadata(
+  local: Option<LocalMediaMetadata>,
+  spotify: Option<PlaybackMetadata>,
+) -> Option<PlaybackMetadata> {
+  match local {
+    Some(local) => Some(PlaybackMetadata {
+      title: local.title,
+      artists: local.artists,
+      album: local.album,
+      image_url: None,
+      duration_ms: local.duration_ms,
+    }),
+    None => spotify,
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -420,5 +477,78 @@ mod tests {
     let app = app();
 
     assert_eq!(current_playback_snapshot(&app), None);
+  }
+
+  #[cfg(all(
+    feature = "local-files",
+    any(
+      all(feature = "mpris", target_os = "linux"),
+      all(feature = "macos-media", target_os = "macos")
+    )
+  ))]
+  #[test]
+  fn local_metadata_is_selected_when_local_active() {
+    use super::{select_media_metadata, LocalMediaMetadata};
+
+    let local = LocalMediaMetadata {
+      title: "Local Song".to_string(),
+      artists: vec!["Local Artist".to_string()],
+      album: "Local Album".to_string(),
+      duration_ms: 200_000,
+    };
+    let spotify = PlaybackMetadata {
+      title: "Spotify Song".to_string(),
+      artists: vec!["Spotify Artist".to_string()],
+      album: "Spotify Album".to_string(),
+      image_url: Some("https://example.com/cover.jpg".to_string()),
+      duration_ms: 181_000,
+    };
+
+    let selected = select_media_metadata(Some(local), Some(spotify)).unwrap();
+
+    assert_eq!(selected.title, "Local Song");
+    assert_eq!(selected.artists, vec!["Local Artist"]);
+    assert_eq!(selected.album, "Local Album");
+    assert_eq!(selected.duration_ms, 200_000);
+    // Local sessions carry no album art URL.
+    assert_eq!(selected.image_url, None);
+  }
+
+  #[cfg(all(
+    feature = "local-files",
+    any(
+      all(feature = "mpris", target_os = "linux"),
+      all(feature = "macos-media", target_os = "macos")
+    )
+  ))]
+  #[test]
+  fn spotify_metadata_is_selected_when_local_inactive() {
+    use super::select_media_metadata;
+
+    let spotify = PlaybackMetadata {
+      title: "Spotify Song".to_string(),
+      artists: vec!["Spotify Artist".to_string()],
+      album: "Spotify Album".to_string(),
+      image_url: Some("https://example.com/cover.jpg".to_string()),
+      duration_ms: 181_000,
+    };
+
+    let selected = select_media_metadata(None, Some(spotify.clone())).unwrap();
+
+    assert_eq!(selected, spotify);
+  }
+
+  #[cfg(all(
+    feature = "local-files",
+    any(
+      all(feature = "mpris", target_os = "linux"),
+      all(feature = "macos-media", target_os = "macos")
+    )
+  ))]
+  #[test]
+  fn no_metadata_when_neither_source_active() {
+    use super::select_media_metadata;
+
+    assert_eq!(select_media_metadata(None, None), None);
   }
 }

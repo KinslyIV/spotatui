@@ -316,6 +316,56 @@ mod tests {
 fn update_mpris_state(manager: &mpris::MprisManager, state: &mut MprisState, app: &App) {
   use rspotify::model::enums::RepeatState;
 
+  // Local-file playback owns its own state and never populates the Spotify
+  // playback context, so it takes a dedicated path that reads metadata, play
+  // state, and position straight from the live local player.
+  #[cfg(feature = "local-files")]
+  if let Some(local) = app.local_playback.as_ref() {
+    use crate::infra::media_metadata::{select_media_metadata, LocalMediaMetadata};
+
+    let is_playing = !local.player.is_paused();
+    let position_ms = local.player.position().as_millis() as u64;
+
+    // `select_media_metadata` is the single, unit-tested decision for which
+    // source the OS integration follows; local always wins while it is active.
+    let metadata = select_media_metadata(
+      Some(LocalMediaMetadata {
+        title: local.name.clone(),
+        artists: vec![local.artists.clone()],
+        album: local.album.clone(),
+        duration_ms: local.duration_ms as u32,
+      }),
+      None,
+    )
+    .expect("local metadata is present");
+
+    let new_metadata = MprisMetadata {
+      title: metadata.title.clone(),
+      artists: metadata.artists.clone(),
+      album: metadata.album.clone(),
+      duration_ms: metadata.duration_ms,
+      art_url: metadata.image_url.clone(),
+    };
+    if state.last_metadata.as_ref() != Some(&new_metadata) {
+      manager.set_metadata(
+        &metadata.title,
+        &metadata.artists,
+        &metadata.album,
+        metadata.duration_ms,
+        metadata.image_url,
+      );
+      state.last_metadata = Some(new_metadata);
+    }
+
+    if state.last_is_playing != Some(is_playing) {
+      manager.set_playback_status(is_playing);
+      state.last_is_playing = Some(is_playing);
+    }
+
+    manager.set_position(position_ms);
+    return;
+  }
+
   if let Some(snapshot) = crate::infra::media_metadata::current_playback_snapshot(app) {
     let new_metadata = MprisMetadata {
       title: snapshot.metadata.title.clone(),
