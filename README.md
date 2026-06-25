@@ -197,6 +197,7 @@ spotatui can play audio directly without needing spotifyd or the official Spotif
 - Works with media keys, MPRIS (Linux), and macOS Now Playing
 - Premium account required
 - Context-backed native playback prefers Spotify-visible playback starts when it is safe to do so, while raw URI-list playback stays on the stable direct native path
+- Runs on our maintained [librespot fork](https://github.com/LargeModGames/spotatui-librespot), which backports upstream fixes for Spotify's evolving audio delivery (e.g. the HTTP 530 CDN issue that silenced native playback)
 
 > **Known limitation — `error audio key 0 1`:** Since late 2025, Spotify rejects librespot's audio-key requests for some accounts (more common on newer accounts), so native playback can't decrypt audio and fails. This is an upstream Spotify change that affects every librespot-based client (not just spotatui) and can't be fixed here. When it happens, spotatui shows a status-bar message — press `d` and pick an official Spotify Connect device (the desktop or mobile Spotify app) to keep listening. Accounts created before ~2020 are typically unaffected.
 
@@ -296,7 +297,7 @@ After that there is not much to it.
 
 - [ratatui](https://github.com/ratatui-org/ratatui) - Terminal UI framework
 - [rspotify](https://github.com/ramsayleung/rspotify) - Spotify Web API client
-- [librespot](https://github.com/librespot-org/librespot) - Spotify Connect streaming
+- [librespot](https://github.com/librespot-org/librespot) - Spotify Connect streaming (via our maintained fork [spotatui-librespot](https://github.com/LargeModGames/spotatui-librespot), which backports fixes for Spotify's CDN changes)
 - [tokio](https://github.com/tokio-rs/tokio) - Async runtime
 - [crossterm](https://github.com/crossterm-rs/crossterm) - Terminal manipulation
 - [clap](https://github.com/clap-rs/clap) - CLI argument parsing

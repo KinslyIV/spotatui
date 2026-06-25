@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- **Native streaming silent playback (HTTP 530)**: Native audio no longer fails silently when Spotify's CDN returns HTTP 530 for the first of the candidate URLs it hands out. spotatui now builds librespot from a maintained fork ([spotatui-librespot](https://github.com/LargeModGames/spotatui-librespot)) that backports upstream [PR #1722](https://github.com/librespot-org/librespot/pull/1722) ([#1725](https://github.com/librespot-org/librespot/issues/1725)), falling back to the next CDN URL on any non-206 response. Repeated unavailable tracks now also halt playback instead of stampeding the queue and risking a rate-limit.
 - **Native streaming startup device recovery**: Startup now trusts the local `spotatui` Connect device id, preserves saved external devices, activates the native device when Spotify reports no active playback, and renders an actionable idle playbar so paused native sessions restore without manually opening the device selector ([#301](https://github.com/LargeModGames/spotatui/issues/301)).
 
 ### Added
