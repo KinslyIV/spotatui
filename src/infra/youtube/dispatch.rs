@@ -518,6 +518,17 @@ async fn start_youtube_queue(app: &Arc<Mutex<App>>, uris: &[String], start_idx: 
   }
   let index = start_idx.min(tracks.len() - 1);
 
+  // A livestream (duration 0 in the search row) never finishes downloading —
+  // the tempfile fetch would just spin until the timeout. Refuse up front.
+  if tracks[index].duration_ms == 0 {
+    set_error(
+      app,
+      "Live streams aren't supported on the YouTube source yet".to_string(),
+    )
+    .await;
+    return;
+  }
+
   let video_id = match tracks[index].uri.as_deref().map(video_id_from_uri) {
     Some(Ok(id)) => id.to_string(),
     _ => {
@@ -610,6 +621,8 @@ enum Plan {
   Play(Arc<LocalPlayer>, Arc<YouTubeSource>, String, String),
   OutOfRange,
   BadUri,
+  /// The target row is a livestream (duration 0) — its download never ends.
+  Live,
 }
 
 /// Play the queued track at `target`, reusing the published session. Used by
@@ -625,6 +638,7 @@ async fn play_index(app: &Arc<Mutex<App>>, target: usize) {
       None => return, // session torn down between dispatch and here
       Some(s) => match s.tracks.get(target) {
         None => Plan::OutOfRange,
+        Some(track) if track.duration_ms == 0 => Plan::Live,
         Some(track) => match track.uri.as_deref().map(video_id_from_uri) {
           Some(Ok(id)) => Plan::Play(
             Arc::clone(&s.player),
@@ -649,6 +663,18 @@ async fn play_index(app: &Arc<Mutex<App>>, target: usize) {
     Plan::BadUri => {
       teardown_youtube(app).await;
       set_error(app, "Invalid YouTube URI".to_string()).await;
+      return;
+    }
+    Plan::Live => {
+      // Same semantics as a download failure: end the session rather than
+      // leave an empty sink + unmoved index, which would make auto-advance
+      // re-dispatch onto the same livestream row every tick.
+      teardown_youtube(app).await;
+      set_error(
+        app,
+        "Live streams aren't supported on the YouTube source yet".to_string(),
+      )
+      .await;
       return;
     }
   };
@@ -816,6 +842,42 @@ mod tests {
       .await
     );
     assert!(app.lock().await.youtube_playback.is_none());
+  }
+
+  /// Livestream rows (duration 0) are refused up front with a clear message —
+  /// their download never finishes, so starting one would hang "Fetching…"
+  /// until the timeout.
+  #[tokio::test]
+  async fn livestream_rows_are_refused_without_session() {
+    let app = Arc::new(Mutex::new(test_app()));
+    {
+      let mut guard = app.lock().await;
+      let mut live = video("youtube:live12345", "24/7 Lofi Radio");
+      live.duration_ms = 0;
+      guard.search_results.tracks = Some(Paged {
+        items: vec![live],
+        total: 1,
+        ..Default::default()
+      });
+    }
+    assert!(
+      route_youtube_event(
+        &app,
+        &IoEvent::StartPlayback(None, Some(vec!["youtube:live12345".to_string()]), Some(0))
+      )
+      .await,
+      "livestream start is ours (consumed)"
+    );
+    let guard = app.lock().await;
+    assert!(guard.youtube_playback.is_none(), "no session published");
+    assert!(
+      guard
+        .status_message
+        .as_deref()
+        .is_some_and(|m| m.contains("Live streams")),
+      "user gets an actionable message, got {:?}",
+      guard.status_message
+    );
   }
 
   /// Full local-playlist lifecycle through the dispatch, exactly as the
