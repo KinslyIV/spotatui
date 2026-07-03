@@ -506,6 +506,12 @@ pub async fn start_ui(
   let mut window_title_state = WindowTitleState::default();
   let mut is_first_render = true;
 
+  // Tracks whether the active internet-radio stream has produced audio yet, so
+  // the tick can tell "stream just started, sink not filled" apart from "stream
+  // died / drained" — both of which report `is_finished()` (empty sink).
+  #[cfg(feature = "internet-radio")]
+  let mut radio_stream_started = false;
+
   #[cfg(feature = "scripting")]
   let mut script_engine: Option<ScriptEngine> = match ScriptEngine::new() {
     Ok(mut engine) => {
@@ -824,27 +830,81 @@ pub async fn start_ui(
           }
         }
 
-        #[cfg(feature = "streaming")]
-        if let Some(ref pos) = shared_position {
-          if app.is_streaming_active {
-            let recently_seeked = app
-              .last_native_seek
-              .is_some_and(|t| t.elapsed().as_millis() < app::SEEK_POSITION_IGNORE_MS);
+        // Internet radio has no queue to auto-advance; instead the tick watches
+        // for a live stream that dies (server disconnect or the ring buffer
+        // draining to EOF), which leaves `is_finished()` (empty sink) true while
+        // the session was never paused. `is_finished()` is also true during the
+        // brief pre-playback window before the first bytes arrive, so only tear
+        // down once the stream has actually started producing audio.
+        #[cfg(feature = "internet-radio")]
+        match app.radio_playback.as_ref() {
+          Some(radio) => {
+            if !radio.player.is_finished() {
+              radio_stream_started = true;
+            } else if radio_stream_started {
+              app.radio_playback = None;
+              radio_stream_started = false;
+              app.set_status_message("Radio stream ended", 4);
+            }
+          }
+          None => radio_stream_started = false,
+        }
 
-            if !recently_seeked {
-              let position_ms = pos.load(std::sync::atomic::Ordering::Relaxed);
-              if position_ms > 0 {
-                app.song_progress_ms = position_ms as u128;
+        // A decoded non-Spotify source owns the sink while its `*_playback` is
+        // `Some`. Drive `song_progress_ms` from its live player, and do NOT let
+        // the (paused) librespot position below clobber it.
+        #[allow(unused_mut)]
+        let mut source_owns_playback = false;
+        #[cfg(feature = "local-files")]
+        if let Some(local) = app.local_playback.as_ref() {
+          source_owns_playback = true;
+          let position_ms = local.player.position().as_millis();
+          app.song_progress_ms = position_ms;
+        }
+        #[cfg(feature = "subsonic")]
+        if let Some(subsonic) = app.subsonic_playback.as_ref() {
+          source_owns_playback = true;
+          let position_ms = subsonic.player.position().as_millis();
+          app.song_progress_ms = position_ms;
+        }
+        #[cfg(feature = "internet-radio")]
+        if let Some(radio) = app.radio_playback.as_ref() {
+          source_owns_playback = true;
+          let position_ms = radio.player.position().as_millis();
+          app.song_progress_ms = position_ms;
+        }
+        #[cfg(feature = "youtube")]
+        if let Some(youtube) = app.youtube_playback.as_ref() {
+          source_owns_playback = true;
+          let position_ms = youtube.player.position().as_millis();
+          app.song_progress_ms = position_ms;
+        }
+
+        #[cfg(feature = "streaming")]
+        if !source_owns_playback {
+          if let Some(ref pos) = shared_position {
+            if app.is_streaming_active {
+              let recently_seeked = app
+                .last_native_seek
+                .is_some_and(|t| t.elapsed().as_millis() < app::SEEK_POSITION_IGNORE_MS);
+
+              if !recently_seeked {
+                let position_ms = pos.load(std::sync::atomic::Ordering::Relaxed);
+                if position_ms > 0 {
+                  app.song_progress_ms = position_ms as u128;
+                }
               }
             }
           }
         }
         #[cfg(not(feature = "streaming"))]
-        if let Some(ref pos) = shared_position {
-          if app.is_streaming_active {
-            let position_ms = pos.load(std::sync::atomic::Ordering::Relaxed);
-            if position_ms > 0 {
-              app.song_progress_ms = position_ms as u128;
+        if !source_owns_playback {
+          if let Some(ref pos) = shared_position {
+            if app.is_streaming_active {
+              let position_ms = pos.load(std::sync::atomic::Ordering::Relaxed);
+              if position_ms > 0 {
+                app.song_progress_ms = position_ms as u128;
+              }
             }
           }
         }

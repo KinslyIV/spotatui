@@ -56,6 +56,23 @@ impl PlaybackSnapshot {
 }
 
 pub fn current_playback_snapshot(app: &App) -> Option<PlaybackSnapshot> {
+  // A non-Spotify decoded source (local / subsonic / internet-radio / youtube)
+  // owns the audio sink while its `*_playback` field is `Some`. Starting such a
+  // source only *pauses* librespot and never clears the Spotify context, so
+  // without this branch the snapshot (window title, Discord RPC, and the
+  // MPRIS/macOS fallback path) would keep showing the stale paused Spotify
+  // track. Progress and play-state are read live from the owning source's
+  // player, so they stay correct regardless of librespot's frozen position.
+  #[cfg(any(
+    feature = "local-files",
+    feature = "subsonic",
+    feature = "internet-radio",
+    feature = "youtube"
+  ))]
+  if let Some(snapshot) = source_playback_snapshot(app) {
+    return Some(snapshot);
+  }
+
   let context = app.current_playback_context.as_ref();
   let use_native_metadata = app.is_streaming_active && app.native_track_info.is_some();
 
@@ -126,6 +143,127 @@ pub fn current_playback_snapshot(app: &App) -> Option<PlaybackSnapshot> {
     shuffle,
     repeat,
   })
+}
+
+/// Build a [`PlaybackSnapshot`] for whichever non-Spotify decoded source
+/// currently owns playback (at most one `*_playback` is `Some`). Metadata comes
+/// from the source's stored track info; progress and play-state are read live
+/// from its player. Returns `None` when no such source is active.
+#[cfg(any(
+  feature = "local-files",
+  feature = "subsonic",
+  feature = "internet-radio",
+  feature = "youtube"
+))]
+fn source_playback_snapshot(app: &App) -> Option<PlaybackSnapshot> {
+  #[cfg(feature = "local-files")]
+  if let Some(local) = app.local_playback.as_ref() {
+    return Some(source_snapshot(
+      local.name.clone(),
+      vec![local.artists.clone()],
+      local.album.clone(),
+      local.duration_ms as u32,
+      local.queue.get(local.index).cloned(),
+      local.player.position().as_millis(),
+      !local.player.is_paused(),
+      app,
+    ));
+  }
+
+  #[cfg(feature = "subsonic")]
+  if let Some(subsonic) = app.subsonic_playback.as_ref() {
+    let track = subsonic.tracks.get(subsonic.index)?;
+    return Some(source_snapshot(
+      track.name.clone(),
+      track.artists.clone(),
+      track.album.clone(),
+      track.duration_ms as u32,
+      track.uri.clone(),
+      subsonic.player.position().as_millis(),
+      !subsonic.player.is_paused(),
+      app,
+    ));
+  }
+
+  #[cfg(feature = "youtube")]
+  if let Some(youtube) = app.youtube_playback.as_ref() {
+    let track = youtube.tracks.get(youtube.index)?;
+    return Some(source_snapshot(
+      track.name.clone(),
+      track.artists.clone(),
+      track.album.clone(),
+      track.duration_ms as u32,
+      track.uri.clone(),
+      youtube.player.position().as_millis(),
+      !youtube.player.is_paused(),
+      app,
+    ));
+  }
+
+  #[cfg(feature = "internet-radio")]
+  if let Some(radio) = app.radio_playback.as_ref() {
+    // Prefer the live ICY "Artist - Title" when the stream provides it; fall
+    // back to the station's own tags. A live stream has no track duration.
+    let artists = radio.now_playing_title().unwrap_or_else(|| {
+      if radio.station.artists.is_empty() {
+        radio.station.album.clone()
+      } else {
+        radio.station.artists.join(", ")
+      }
+    });
+    return Some(source_snapshot(
+      radio.station.name.clone(),
+      vec![artists],
+      radio.station.album.clone(),
+      0,
+      radio.station.uri.clone(),
+      radio.player.position().as_millis(),
+      !radio.player.is_paused(),
+      app,
+    ));
+  }
+
+  None
+}
+
+/// Assemble a [`PlaybackSnapshot`] from a decoded source's fields. Sources carry
+/// no album-art URL, are always treated as a single track, and take shuffle from
+/// the user config (no per-source shuffle state).
+#[cfg(any(
+  feature = "local-files",
+  feature = "subsonic",
+  feature = "internet-radio",
+  feature = "youtube"
+))]
+#[allow(clippy::too_many_arguments)]
+fn source_snapshot(
+  title: String,
+  artists: Vec<String>,
+  album: String,
+  duration_ms: u32,
+  item_uri: Option<String>,
+  progress_ms: u128,
+  is_playing: bool,
+  app: &App,
+) -> PlaybackSnapshot {
+  PlaybackSnapshot {
+    metadata: PlaybackMetadata {
+      title,
+      artists,
+      album,
+      image_url: None,
+      duration_ms,
+    },
+    item_kind: PlaybackItemKind::Track,
+    item_id: None,
+    item_uri,
+    context_uri: None,
+    source: PlaybackSource::ExternalDevice,
+    progress_ms,
+    is_playing,
+    shuffle: app.user_config.behavior.shuffle_enabled,
+    repeat: None,
+  }
 }
 
 fn metadata_and_identity_from_context_item(

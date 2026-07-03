@@ -376,16 +376,71 @@ pub(crate) fn playbar_control_hitboxes(
   }
 
   let controls_area = playbar_layout_areas(app, playbar_area).controls_area;
-  playbar_control_hitboxes_in_area(controls_area)
+  let mut hitboxes: Vec<(PlaybarControl, Rect)> = playbar_control_hitboxes_in_area(controls_area)
     .into_iter()
     .map(|hitbox| (hitbox.control, hitbox.rect))
-    .collect()
+    .collect();
+
+  // A non-Spotify source only has a verified-correct route for Play/Pause
+  // (`App::toggle_playback` branches on the owning source before falling
+  // back to librespot). Next/Prev/Shuffle/volume have no such per-source
+  // guard yet (transport-2/3, tracked separately) and would otherwise drive
+  // paused librespot instead of the audible source — so keep those hitboxes
+  // out of the click surface until that routing lands, rather than wiring a
+  // click that acts on the wrong player.
+  if non_spotify_source_playback_active(app) && app.current_playback_context.is_none() {
+    hitboxes.retain(|(control, _)| *control == PlaybarControl::PlayPause);
+  }
+
+  hitboxes
 }
 
 fn playbar_controls_available(app: &App) -> bool {
-  app.current_playback_context.as_ref().is_some_and(|ctx| {
+  if app.current_playback_context.as_ref().is_some_and(|ctx| {
     ctx.item.is_some() || (app.is_streaming_active && app.native_device_id.is_some())
-  })
+  }) {
+    return true;
+  }
+
+  non_spotify_source_playback_active(app)
+}
+
+/// True when a non-Spotify source (local/subsonic/radio/youtube) currently
+/// owns playback. Each source's playback field is gated behind its own
+/// feature flag, so every access here is guarded to match — this must
+/// compile in the slim build (no source features) as well as any single- or
+/// all-sources build.
+fn non_spotify_source_playback_active(app: &App) -> bool {
+  // Slim builds (no source features) never reference `app` below.
+  #[cfg(not(any(
+    feature = "local-files",
+    feature = "subsonic",
+    feature = "internet-radio",
+    feature = "youtube"
+  )))]
+  let _ = app;
+
+  #[cfg(feature = "local-files")]
+  if app.local_playback.is_some() {
+    return true;
+  }
+
+  #[cfg(feature = "subsonic")]
+  if app.subsonic_playback.is_some() {
+    return true;
+  }
+
+  #[cfg(feature = "internet-radio")]
+  if app.radio_playback.is_some() {
+    return true;
+  }
+
+  #[cfg(feature = "youtube")]
+  if app.youtube_playback.is_some() {
+    return true;
+  }
+
+  false
 }
 
 pub(crate) fn playbar_control_at(

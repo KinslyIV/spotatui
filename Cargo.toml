@@ -147,7 +147,7 @@ scripting = ["dep:mlua"]
 # source that plays decoded audio through the local sink (local files, Subsonic).
 audio-decode = ["dep:rodio"]
 local-files = ["audio-decode", "dep:lofty", "dep:symphonia"]
-subsonic = ["dep:md-5", "audio-decode", "dep:tempfile"]
+subsonic = ["dep:md-5", "audio-decode", "dep:tempfile", "reqwest/stream"]
 internet-radio = ["audio-decode", "dep:stream-download", "dep:icy-metadata"]
 # YouTube via an external `yt-dlp` binary (no new crates): search with
 # `--flat-playlist --dump-json`, download the AAC/M4A audio (format 140, which

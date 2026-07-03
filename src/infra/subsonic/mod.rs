@@ -25,9 +25,12 @@
 pub mod dispatch;
 mod types;
 
+use std::io::Write;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use futures::StreamExt;
 use md5::{Digest, Md5};
 use rand::Rng;
 use reqwest::Client;
@@ -49,6 +52,17 @@ const CLIENT_NAME: &str = "spotatui";
 
 const PLAYLIST_PREFIX: &str = "subsonic:playlist:";
 const TRACK_PREFIX: &str = "subsonic:track:";
+
+/// Cap on establishing the TCP+TLS connection. A server that never completes the
+/// handshake (captive portal, half-open TCP) fails fast instead of hanging the
+/// serial IoEvent pump.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Overall per-request cap covering connect + body. `fetch`/`download_track` are
+/// awaited inline on the pump, so a server that connects then stalls the body
+/// (e.g. behind a proxy) must not wedge transport for every source forever.
+/// Applies per request, so it also bounds each streamed download below.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
 // SubsonicPlaybackState
@@ -149,7 +163,19 @@ impl SubsonicSource {
       base_url: base_url.trim_end_matches('/').to_string(),
       username: username.into(),
       password: password.into(),
-      http: Client::new(),
+      // A bare `Client::new()` has no timeouts: a server that connects then
+      // stalls the body wedges the serial IoEvent pump permanently, killing
+      // transport for every source. Bound both the handshake and the whole
+      // request. `.timeout()` applies per request, so it also caps the streamed
+      // download in `download_track` (each chunk read must make progress within
+      // the window) without needing a separate wrapper there.
+      http: Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        // Falls back to a default (untimed) client only if TLS init fails, which
+        // would break every other request in the app too.
+        .unwrap_or_default(),
     }
   }
 
@@ -247,26 +273,42 @@ impl SubsonicSource {
     )
   }
 
-  /// Download a track's audio to `dest`. Buffers the whole response in memory
-  /// then writes it; the file is then played from disk by the shared player.
+  /// Download a track's audio to `dest`, streaming the response body to disk
+  /// chunk-by-chunk; the file is then played from disk by the shared player.
+  ///
+  /// Streaming (rather than buffering the whole body with `.bytes()`) avoids a
+  /// multi-hundred-MB RAM spike per track change for large lossless FLAC or
+  /// audiobook files — the server default is the original file. The client's
+  /// overall `.timeout()` still bounds the whole download.
   ///
   /// Async (reqwest), so it must be awaited **without** holding `App`'s lock.
   pub async fn download_track(&self, track_id: &str, dest: &std::path::Path) -> Result<()> {
     let url = self.stream_url(track_id);
-    let bytes = self
+    let response = self
       .http
       .get(&url)
       .send()
       .await
       .context("HTTP request to Subsonic stream failed")?
       .error_for_status()
-      .context("Subsonic stream returned an HTTP error")?
-      .bytes()
-      .await
-      .context("Failed to read Subsonic stream body")?;
-    tokio::fs::write(dest, &bytes)
-      .await
-      .with_context(|| format!("writing stream to {}", dest.display()))?;
+      .context("Subsonic stream returned an HTTP error")?;
+
+    // Write to a synchronous file inside the streaming loop: each chunk is a
+    // small `Bytes` and rodio reads the finished file from disk, so a blocking
+    // write here is cheap and keeps peak memory to one chunk rather than the
+    // whole track.
+    let mut file = std::fs::File::create(dest)
+      .with_context(|| format!("creating stream file {}", dest.display()))?;
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+      let chunk = chunk.context("Failed to read Subsonic stream body")?;
+      file
+        .write_all(&chunk)
+        .with_context(|| format!("writing stream to {}", dest.display()))?;
+    }
+    file
+      .flush()
+      .with_context(|| format!("flushing stream to {}", dest.display()))?;
     Ok(())
   }
 }

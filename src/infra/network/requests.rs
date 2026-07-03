@@ -30,7 +30,20 @@ static SHARED_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 /// cheaply across all request paths (Spotify API, friends relay, telemetry,
 /// lyrics).
 pub fn shared_http_client() -> &'static reqwest::Client {
-  SHARED_HTTP_CLIENT.get_or_init(reqwest::Client::new)
+  SHARED_HTTP_CLIENT.get_or_init(|| {
+    // Spotify API (and the friends relay / lyrics / telemetry paths that share
+    // this client) all return bounded, non-streaming responses, so a blanket
+    // request timeout is safe here. Without one, a post-connect read stall
+    // (captive portal, half-open TCP, an edge that accepts then sends nothing)
+    // makes `send()`/`text()` await forever on the serial IoEvent pump and
+    // freezes the whole app until it is killed. An explicit connect timeout
+    // additionally bounds the TCP/TLS handshake.
+    reqwest::Client::builder()
+      .connect_timeout(Duration::from_secs(10))
+      .timeout(Duration::from_secs(30))
+      .build()
+      .unwrap_or_else(|_| reqwest::Client::new())
+  })
 }
 
 fn response_is_json(response: &reqwest::Response) -> bool {

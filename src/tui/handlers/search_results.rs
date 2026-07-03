@@ -592,14 +592,16 @@ pub fn handler(key: Key, app: &mut App) {
           &app.search_results.playlists,
           app.search_results.selected_playlists_index,
         ) {
-          let selected_playlist = &playlists.items[selected_index].name;
-          app.dialog = Some(selected_playlist.clone());
-          app.confirm = false;
+          if let Some(selected_playlist) = playlists.items.get(selected_index) {
+            let selected_playlist = selected_playlist.name.clone();
+            app.dialog = Some(selected_playlist);
+            app.confirm = false;
 
-          app.push_navigation_stack(
-            RouteId::Dialog,
-            ActiveBlock::Dialog(DialogContext::PlaylistSearch),
-          );
+            app.push_navigation_stack(
+              RouteId::Dialog,
+              ActiveBlock::Dialog(DialogContext::PlaylistSearch),
+            );
+          }
         }
       }
       SearchResultBlock::ShowSearch => app.user_unfollow_show(ActiveBlock::SearchResultBlock),
@@ -742,5 +744,39 @@ mod tests {
       app.get_current_route().active_block,
       ActiveBlock::Dialog(DialogContext::AddTrackToPlaylistPicker)
     );
+  }
+
+  /// panic-1 regression: a stale `selected_playlists_index` left over from a
+  /// longer search page must not panic when a shorter page has since replaced
+  /// it (the root-cause clamp lives in `infra/network/search.rs`; this test
+  /// guards the handler-side defense in depth: `.get()` instead of `[..]`).
+  #[test]
+  fn pressing_shift_d_with_stale_index_past_shorter_playlist_page_does_not_panic() {
+    let (_tx, _rx) = channel();
+    let mut app = App::new(_tx, UserConfig::new(), SystemTime::now());
+    app.search_results.playlists = Some(Paged {
+      items: vec![playlist_info(
+        "37i9dQZF1DXcBWIGoYBM5M",
+        "Only Playlist",
+        "spotatui-owner",
+        false,
+      )],
+      offset: 0,
+      limit: 1,
+      total: 1,
+      next: None,
+      previous: None,
+    });
+    // Stale index from a previous, longer page — out of range for the page above.
+    app.search_results.selected_playlists_index = Some(20);
+    app.search_results.selected_block = SearchResultBlock::PlaylistSearch;
+    app.push_navigation_stack(RouteId::Search, ActiveBlock::SearchResultBlock);
+
+    // Must not panic.
+    handler(Key::Char('D'), &mut app);
+
+    // Out-of-range index: the dialog is not opened (no-op), matching sibling
+    // `.get()`-guarded handlers elsewhere in this file.
+    assert!(app.dialog.is_none());
   }
 }

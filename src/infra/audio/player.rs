@@ -78,14 +78,22 @@ impl LocalPlayer {
     allow(dead_code)
   )]
   pub fn play_file(&self, path: &Path) -> Result<()> {
+    // Stop whatever is currently playing *before* any fallible step (open or
+    // decode), so a failure here can never leave the previous track audible. A
+    // manual Next/Previous into a missing or undecodable file must fall silent:
+    // `play_index`'s failure arm relies on the sink draining here so the runner
+    // tick's `is_finished()` fires and auto-advance skips past the bad file
+    // instead of dead-ending on a stale, still-playing track.
+    self.sink.clear();
+
     let file = std::fs::File::open(path)
       .with_context(|| format!("opening audio file {}", path.display()))?;
+
+    // On decode error we return with the sink already empty (no old track
+    // playing); on success we append and start the new source below.
     let decoder = Decoder::new(BufReader::new(file))
       .with_context(|| format!("decoding audio file {}", path.display()))?;
 
-    // `clear` drops any queued source and pauses the sink; re-`play` after the
-    // new source is appended so playback actually starts.
-    self.sink.clear();
     self.sink.append(decoder);
     self.sink.play();
     Ok(())

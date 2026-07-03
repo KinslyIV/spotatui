@@ -666,6 +666,14 @@ impl PlaybackNetwork for Network {
 
     let mut app = self.app.lock().await;
 
+    // Cover-art download (network + synchronous image decode) must NOT happen
+    // while the `App` guard is held: the render loop locks the same mutex every
+    // frame, so awaiting the CDN round-trip under the guard freezes the whole UI
+    // on every track change (#142). We only extract the URL to fetch here (cheap),
+    // then release the guard before doing any of the slow work below.
+    #[cfg(feature = "cover-art")]
+    let mut cover_art_url_to_fetch: Option<String> = None;
+
     match context {
       #[allow(unused_mut)]
       Ok(Some(mut c)) => {
@@ -813,7 +821,9 @@ impl PlaybackNetwork for Network {
         }
 
         if !stale_api_item_for_native {
-          // Get album/episode cover art
+          // Get album/episode cover art. We only decide *what* to fetch here,
+          // under the guard; the actual download + decode happens off-lock after
+          // the guard is dropped (see below), so the render loop is never blocked.
           #[cfg(feature = "cover-art")]
           if app
             .user_config
@@ -827,10 +837,11 @@ impl PlaybackNetwork for Network {
               };
 
               if let Some(image) = image {
-                // Cover art is non-essential: a failed image fetch must not surface a
-                // blocking error or abort the rest of the playback-context update (#142).
-                if let Err(err) = app.cover_art.refresh(image).await {
-                  log::warn!("ignoring cover art load failure: {err}");
+                // Skip re-fetching art we already hold (same URL). This read is
+                // cheap and serialized with the store below by the serial IoEvent
+                // pump, so there is no lost-update race.
+                if app.cover_art.get_url().as_deref() != Some(image.url.as_str()) {
+                  cover_art_url_to_fetch = Some(image.url.clone());
                 }
               }
             }
@@ -959,6 +970,30 @@ impl PlaybackNetwork for Network {
 
     app.seek_ms.take();
     app.is_fetching_current_playback = false;
+
+    // Release the `App` guard before any cover-art network/decode work. From here
+    // on there is NO `App` guard held, so the render loop can lock the mutex freely
+    // and the UI stays responsive during the (timeout-bounded) CDN round-trip.
+    #[cfg(feature = "cover-art")]
+    {
+      drop(app);
+      if let Some(url) = cover_art_url_to_fetch {
+        // Cover art is non-essential: a failed image fetch must not surface a
+        // blocking error or abort anything (#142).
+        match crate::tui::cover_art::CoverArt::fetch_and_decode(&url).await {
+          Ok(img) => {
+            // Re-acquire the guard only to store the already-decoded image. This
+            // is await-free and cheap (protocol wrapping defers encoding), so no
+            // `.await` ever runs under the guard on the cover-art path.
+            let app = self.app.lock().await;
+            app.cover_art.store_decoded(url, img);
+          }
+          Err(err) => {
+            log::warn!("ignoring cover art load failure: {err}");
+          }
+        }
+      }
+    }
   }
 
   async fn start_playback(

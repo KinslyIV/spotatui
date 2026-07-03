@@ -87,9 +87,16 @@ use crate::core::source::{MediaSource, Streamer};
 // ---------------------------------------------------------------------------
 
 /// File extensions recognised as audio files.
-const AUDIO_EXTENSIONS: &[&str] = &[
-  "mp3", "flac", "ogg", "opus", "m4a", "aac", "wav", "aiff", "aif", "wv", "ape",
-];
+///
+/// Restricted to formats the default rodio decoder can actually play
+/// (FLAC / MP3 / MP4-AAC / Ogg-Vorbis / WAV — see [`LocalPlayer::play_file`]).
+/// Extensions the decoder rejects at playback time are deliberately excluded so
+/// the library never lists a file that would fail to decode:
+///   - `opus` — rodio's `vorbis` feature decodes Ogg-*Vorbis* only; there is no
+///     Opus codec in the build, so `.opus` files probe but fail to decode.
+///   - `aiff` / `aif` / `wv` (WavPack) / `ape` (Monkey's Audio) — no decoder in
+///     the default feature set.
+const AUDIO_EXTENSIONS: &[&str] = &["mp3", "flac", "ogg", "m4a", "aac", "wav"];
 
 fn is_audio_file(path: &Path) -> bool {
   path
@@ -546,7 +553,8 @@ mod tests {
 
   #[test]
   fn audio_extensions_are_recognised() {
-    for ext in ["mp3", "flac", "ogg", "opus", "m4a", "wav"] {
+    // Only formats the default rodio decoder can actually play.
+    for ext in ["mp3", "flac", "ogg", "m4a", "aac", "wav"] {
       let p = PathBuf::from(format!("track.{ext}"));
       assert!(is_audio_file(&p), "expected {ext} to be audio");
     }
@@ -557,6 +565,34 @@ mod tests {
     for name in ["image.jpg", "cover.png", "README.md", "playlist.m3u"] {
       let p = PathBuf::from(name);
       assert!(!is_audio_file(&p), "expected {name} not to be audio");
+    }
+  }
+
+  /// The whitelist must not offer files the default rodio decoder rejects at
+  /// playback time. Listing an undecodable extension makes `play_file` fail
+  /// mid-queue; guarding the whitelist keeps such files out of the library so a
+  /// manual Next/Previous can never land on one. See `AUDIO_EXTENSIONS`.
+  #[test]
+  fn undecodable_extensions_are_not_whitelisted() {
+    // rodio's default features decode Ogg-Vorbis, not Opus; the rest have no
+    // decoder in the build at all.
+    for ext in ["opus", "aiff", "aif", "wv", "ape"] {
+      assert!(
+        !AUDIO_EXTENSIONS.contains(&ext),
+        "{ext} is not decodable by the default rodio build and must be excluded"
+      );
+      assert!(
+        !is_audio_file(&PathBuf::from(format!("track.{ext}"))),
+        "an undecodable {ext} file must not be treated as audio"
+      );
+    }
+
+    // The formats the decoder *does* support must still be present.
+    for ext in ["mp3", "flac", "ogg", "m4a", "aac", "wav"] {
+      assert!(
+        AUDIO_EXTENSIONS.contains(&ext),
+        "{ext} is decodable and must stay whitelisted"
+      );
     }
   }
 

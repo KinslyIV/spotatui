@@ -22,6 +22,7 @@
 use std::io::{Read, Seek};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use icy_metadata::{IcyHeaders, IcyMetadataReader};
@@ -44,6 +45,16 @@ const PREFETCH_BYTES: u64 = 64 * 1024;
 /// Size of the in-memory ring buffer holding the live stream. Must comfortably
 /// exceed [`PREFETCH_BYTES`]; ~30 s of audio at 128 kbps.
 const RING_BUFFER_BYTES: usize = 512 * 1024;
+
+/// Cap on establishing the TCP+TLS connection to the station. A station that
+/// never completes the handshake fails fast instead of hanging the serial pump.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Cap on the connect + header-wait phase (`HttpStream::new`). A station that
+/// accepts the connection then withholds response headers would otherwise hang
+/// the pump forever. This bounds only the tune-in handshake — NOT the audio body,
+/// which is an infinite stream and must never be subject to a request timeout.
+const HEADER_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// A successfully opened radio stream, ready to hand to
 /// [`LocalPlayer::play_stream`](crate::infra::audio::LocalPlayer::play_stream).
@@ -75,14 +86,25 @@ pub async fn open_radio_stream(url: &str) -> Result<OpenedStream> {
     // occasionally reject UA-less requests too.
     .user_agent(concat!("spotatui/", env!("CARGO_PKG_VERSION")))
     .default_headers(headers)
+    // Bound the connect phase so a station that never completes the handshake
+    // fails fast. Deliberately NO blanket `.timeout()`: the audio body is an
+    // infinite stream, and a request timeout would kill playback mid-song. Only
+    // the connect + header phase is bounded (via `HEADER_TIMEOUT` below).
+    .connect_timeout(CONNECT_TIMEOUT)
     .build()
     .context("building radio stream HTTP client")?;
 
   let parsed: reqwest::Url = url
     .parse()
     .with_context(|| format!("invalid radio stream URL: {url}"))?;
-  let stream = HttpStream::new(client, parsed)
+  // `HttpStream::new` connects and waits for response headers. A station that
+  // accepts the connection then withholds headers would hang the serial pump
+  // forever, so bound the header-wait. This wrapper covers ONLY the tune-in
+  // handshake; once `HttpStream` is returned, the infinite body is read without
+  // any request timeout.
+  let stream = tokio::time::timeout(HEADER_TIMEOUT, HttpStream::new(client, parsed))
     .await
+    .map_err(|_| anyhow!("timed out waiting for radio stream headers from {url}"))?
     .map_err(|e| anyhow!("connecting to radio stream {url}: {e}"))?;
 
   let icy_headers = IcyHeaders::parse_from_headers(stream.headers());

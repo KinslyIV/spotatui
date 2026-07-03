@@ -1932,6 +1932,18 @@ impl App {
       "seeking forwards by {} ms",
       self.user_config.behavior.seek_milliseconds
     );
+    // A seekable decoded source (local/subsonic/youtube) owns the session: seek
+    // relative to *its* live position, never from the stale/foreign Spotify
+    // progress. Radio returns None here, so its seek keys are correct no-ops.
+    // The source player clamps to the track duration internally, so no upper
+    // clamp is needed (and we must not read the stale Spotify context duration).
+    if let Some(pos) = self.active_source_position_ms() {
+      let new_progress = (pos as u32).saturating_add(self.user_config.behavior.seek_milliseconds);
+      self.song_progress_ms = new_progress as u128;
+      self.seek_ms = None;
+      self.dispatch(IoEvent::Seek(new_progress));
+      return;
+    }
     if let Some(CurrentPlaybackContext {
       item: Some(item), ..
     }) = &self.current_playback_context
@@ -1986,6 +1998,16 @@ impl App {
       "seeking backwards by {} ms",
       self.user_config.behavior.seek_milliseconds
     );
+    // A seekable decoded source (local/subsonic/youtube) owns the session: seek
+    // relative to *its* live position, never from the stale/foreign Spotify
+    // progress. Radio returns None here, so its seek keys are correct no-ops.
+    if let Some(pos) = self.active_source_position_ms() {
+      let new_progress = (pos as u32).saturating_sub(self.user_config.behavior.seek_milliseconds);
+      self.song_progress_ms = new_progress as u128;
+      self.seek_ms = None;
+      self.dispatch(IoEvent::Seek(new_progress));
+      return;
+    }
     let old_progress = match self.seek_ms {
       Some(seek_ms) => seek_ms,
       None => self.song_progress_ms,
@@ -2024,6 +2046,16 @@ impl App {
   /// dragging on the playbar progress line). The target is clamped to the track
   /// duration. Mirrors the dispatch logic of [`Self::seek_forwards`].
   pub fn seek_to(&mut self, position_ms: u32) {
+    // A seekable decoded source (local/subsonic/youtube) owns the session: seek
+    // it to the absolute target directly (the source player clamps to the track
+    // duration internally). Radio returns None here, so its playbar drags are
+    // correct no-ops. Never read the stale Spotify context duration for a source.
+    if self.active_source_position_ms().is_some() {
+      self.song_progress_ms = position_ms as u128;
+      self.seek_ms = None;
+      self.dispatch(IoEvent::Seek(position_ms));
+      return;
+    }
     if let Some(CurrentPlaybackContext {
       item: Some(item), ..
     }) = &self.current_playback_context
@@ -2202,7 +2234,10 @@ impl App {
       .current_playback_context
       .as_ref()
       .and_then(|c| c.device.volume_percent)
-      .unwrap_or(0)
+      // No Spotify device volume (e.g. a decoded source is playing, or the slim
+      // build has no context): fall back to the configured volume, not 0, so the
+      // playbar and volume-up/down base math stay correct for every source.
+      .unwrap_or(self.user_config.behavior.volume_percent as u32)
   }
 
   /// Set volume to an absolute percentage (0-100). Routes through the same
@@ -2215,6 +2250,16 @@ impl App {
 
     if next_volume != current_volume {
       info!("setting volume to {}", next_volume);
+      // A decoded source owns the sink: route the volume change to its
+      // dispatcher (which sets the rodio sink's gain), never to the paused
+      // librespot. The dispatcher converts the u8 percentage to a float.
+      if self.active_decoded_source() {
+        self.dispatch(IoEvent::ChangeVolume(next_volume));
+        self.user_config.behavior.volume_percent = next_volume;
+        let _ = self.user_config.save_config();
+        self.pending_volume = Some(next_volume);
+        return;
+      }
       // Use native streaming player for instant control (bypasses event channel latency)
       #[cfg(feature = "streaming")]
       if self.is_native_streaming_active_for_playback() {
@@ -2253,6 +2298,16 @@ impl App {
 
     if next_volume != current_volume {
       info!("increasing volume: {} -> {}", current_volume, next_volume);
+      // A decoded source owns the sink: route the volume change to its
+      // dispatcher (which sets the rodio sink's gain), never to the paused
+      // librespot. The dispatcher converts the u8 percentage to a float.
+      if self.active_decoded_source() {
+        self.dispatch(IoEvent::ChangeVolume(next_volume));
+        self.user_config.behavior.volume_percent = next_volume;
+        let _ = self.user_config.save_config();
+        self.pending_volume = Some(next_volume);
+        return;
+      }
       // Use native streaming player for instant control (bypasses event channel latency)
       #[cfg(feature = "streaming")]
       if self.is_native_streaming_active_for_playback() {
@@ -2296,6 +2351,16 @@ impl App {
         current_volume, next_volume_u8
       );
 
+      // A decoded source owns the sink: route the volume change to its
+      // dispatcher (which sets the rodio sink's gain), never to the paused
+      // librespot. The dispatcher converts the u8 percentage to a float.
+      if self.active_decoded_source() {
+        self.dispatch(IoEvent::ChangeVolume(next_volume_u8));
+        self.user_config.behavior.volume_percent = next_volume_u8;
+        let _ = self.user_config.save_config();
+        self.pending_volume = Some(next_volume_u8);
+        return;
+      }
       // Use native streaming player for instant control (bypasses event channel latency)
       #[cfg(feature = "streaming")]
       if self.is_native_streaming_active_for_playback() {
@@ -2431,6 +2496,63 @@ impl App {
     false
   }
 
+  /// Whether any decoded-audio source (local file, Subsonic, internet radio, or
+  /// YouTube) currently owns the playback session.
+  ///
+  /// Starting a non-Spotify source only *pauses* librespot; it never clears
+  /// `is_streaming_active` / `current_playback_context`, so
+  /// [`is_native_streaming_active_for_playback`](Self::is_native_streaming_active_for_playback)
+  /// stays true while a decoded source owns the rodio sink. The direct-control
+  /// transport methods (next/prev/volume) use this guard to route to the active
+  /// source via `IoEvent` dispatch instead of driving the paused librespot.
+  ///
+  /// Radio is included: routing Next/volume to radio's dispatcher (which no-ops
+  /// or handles it) is still correct — we must never drive librespot while a
+  /// source is playing. In a build with all source features off this reduces to
+  /// `false`.
+  fn active_decoded_source(&self) -> bool {
+    #[cfg(feature = "local-files")]
+    if self.local_playback.is_some() {
+      return true;
+    }
+    #[cfg(feature = "subsonic")]
+    if self.subsonic_playback.is_some() {
+      return true;
+    }
+    #[cfg(feature = "internet-radio")]
+    if self.radio_playback.is_some() {
+      return true;
+    }
+    #[cfg(feature = "youtube")]
+    if self.youtube_playback.is_some() {
+      return true;
+    }
+    false
+  }
+
+  /// The current playback position, in milliseconds, of the active *seekable*
+  /// decoded source (local file, Subsonic, or YouTube).
+  ///
+  /// Read live from the source player's sink. Internet radio is intentionally
+  /// **excluded** — a live stream is not seekable — so radio returns `None` here
+  /// and seek keys become correct no-ops for radio. In a build with all seekable
+  /// source features off this reduces to `None`.
+  fn active_source_position_ms(&self) -> Option<u128> {
+    #[cfg(feature = "local-files")]
+    if let Some(local) = &self.local_playback {
+      return Some(local.player.position().as_millis());
+    }
+    #[cfg(feature = "subsonic")]
+    if let Some(subsonic) = &self.subsonic_playback {
+      return Some(subsonic.player.position().as_millis());
+    }
+    #[cfg(feature = "youtube")]
+    if let Some(youtube) = &self.youtube_playback {
+      return Some(youtube.player.position().as_millis());
+    }
+    None
+  }
+
   pub fn toggle_playback(&mut self) {
     // Local-file playback owns the session: toggle the local sink directly. The
     // playbar reads pause state live from the player, so nothing else to update.
@@ -2462,6 +2584,20 @@ impl App {
         youtube.player.resume();
       } else {
         youtube.player.pause();
+      }
+      return;
+    }
+
+    // Internet-radio playback owns the session the same way: toggle its sink
+    // directly. Without this branch radio falls through to the streaming path,
+    // which only ever emits a bare resume — so Play/Pause could resume radio but
+    // never pause it.
+    #[cfg(feature = "internet-radio")]
+    if let Some(radio) = &self.radio_playback {
+      if radio.player.is_paused() {
+        radio.player.resume();
+      } else {
+        radio.player.pause();
       }
       return;
     }
@@ -2531,6 +2667,18 @@ impl App {
 
   pub fn previous_track(&mut self) {
     info!("playing previous track or restarting current track");
+    // A decoded source owns the session: route to its dispatcher, never to the
+    // paused librespot. Preserve the ">= 3s restarts current, else previous"
+    // semantics (radio no-ops both Seek and PreviousTrack).
+    if self.active_decoded_source() {
+      if self.song_progress_ms >= 3_000 {
+        self.dispatch(IoEvent::Seek(0));
+      } else {
+        self.dispatch(IoEvent::PreviousTrack);
+      }
+      self.song_progress_ms = 0;
+      return;
+    }
     if self.song_progress_ms >= 3_000 {
       // If more than 3 seconds into the song, restart from beginning
       #[cfg(feature = "streaming")]
@@ -2573,6 +2721,13 @@ impl App {
 
   pub fn force_previous_track(&mut self) {
     info!("force skipping to previous track");
+    // A decoded source owns the session: route to its dispatcher, never to the
+    // paused librespot. The source handles or no-ops ForcePreviousTrack.
+    if self.active_decoded_source() {
+      self.song_progress_ms = 0;
+      self.dispatch(IoEvent::ForcePreviousTrack);
+      return;
+    }
     #[cfg(feature = "streaming")]
     if self.is_native_streaming_active_for_playback() {
       if let Some(ref player) = self.streaming_player {
@@ -2600,6 +2755,14 @@ impl App {
 
   pub fn next_track(&mut self) {
     info!("skipping to next track");
+    // A decoded source (local/subsonic/radio/youtube) owns the session: route to
+    // its dispatcher, never to the paused librespot. The source handles or
+    // no-ops NextTrack (radio has no queue).
+    if self.active_decoded_source() {
+      self.song_progress_ms = 0;
+      self.dispatch(IoEvent::NextTrack);
+      return;
+    }
     // Use native streaming player for instant control (bypasses event channel latency)
     #[cfg(feature = "streaming")]
     if self.is_native_streaming_active_for_playback() {
@@ -5300,6 +5463,26 @@ mod tests {
   fn make_app_simple() -> App {
     let (tx, _rx) = channel();
     App::new(tx, UserConfig::new(), SystemTime::now())
+  }
+
+  // Regression for transport-4: with no Spotify device volume and no pending
+  // volume (the state while a decoded source plays, and the whole slim build),
+  // `desired_volume` must fall back to the configured volume, not 0. The old
+  // `.unwrap_or(0)` made volume-down a dead no-op and the first volume-up snap
+  // to the increment. This is the only hardware-free guard for that fix — a
+  // source-active transport test needs a real audio device (see report).
+  #[test]
+  fn desired_volume_falls_back_to_config_when_no_context() {
+    let mut app = make_app_simple();
+    app.current_playback_context = None;
+    app.pending_volume = None;
+    app.user_config.behavior.volume_percent = 42;
+
+    assert_eq!(
+      app.desired_volume(),
+      42,
+      "with no device volume and no pending volume, base volume must come from config, not 0"
+    );
   }
 
   #[test]

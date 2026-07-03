@@ -336,10 +336,21 @@ async fn play_index(app: &Arc<Mutex<App>>, target: usize) {
         .set_status_message(format!("\u{266a} {display_name}"), 4);
     }
     Ok(Err(e)) => {
+      // `play_file` clears the sink before any fallible step, so on a normal
+      // decode/open error the sink is already empty and the runner tick
+      // auto-advances past this bad track. Stop the player anyway as
+      // defense-in-depth: it is idempotent and guarantees no stale audio even if
+      // the blocking closure failed *before* reaching `play_file`.
+      player.stop();
       commit_index(app, target, None).await;
       set_error(app, format!("Cannot play local file: {e}")).await;
     }
     Err(e) => {
+      // The blocking task panicked (e.g. inside the tag read) *before*
+      // `play_file` could clear the sink, so the old track may still be playing.
+      // Stop it explicitly so the empty sink lets the tick auto-advance instead
+      // of dead-ending on a stale track with a silently moved index.
+      player.stop();
       commit_index(app, target, None).await;
       set_error(app, format!("Local playback task failed: {e}")).await;
     }

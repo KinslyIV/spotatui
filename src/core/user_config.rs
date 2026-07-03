@@ -1008,6 +1008,17 @@ impl UserConfig {
           fs::create_dir(&app_config_dir)?;
         }
 
+        // Restrict the app's own config directory (holds config.yml, which
+        // carries the Subsonic password and party sync_token in cleartext,
+        // plus the Spotify token cache) to owner-only. Never touch
+        // `home_config_dir` (`~/.config`) — that's shared with every other
+        // application on the system.
+        #[cfg(unix)]
+        {
+          use std::os::unix::fs::PermissionsExt;
+          fs::set_permissions(&app_config_dir, fs::Permissions::from_mode(0o700))?;
+        }
+
         let config_file_path = &app_config_dir.join(FILE_NAME);
 
         let paths = UserConfigPaths {
@@ -1691,9 +1702,16 @@ impl UserConfig {
       }
     };
 
+    // Serialize to a String/bytes first, then write via a private-file helper
+    // (0o600 on Unix — this file carries the Subsonic password and party
+    // sync_token in cleartext, so it deserves the same protection as the
+    // Spotify token cache) using a temp-file + atomic rename, so a crash
+    // mid-write can't corrupt the config. Do not log `content_yml`: it may
+    // contain the plaintext password/sync_token.
     let content_yml = serde_yaml::to_string(&final_config)?;
-    let mut config_file = fs::File::create(&paths.config_file_path)?;
-    std::io::Write::write_all(&mut config_file, content_yml.as_bytes())?;
+    let tmp_path = paths.config_file_path.with_extension("yml.tmp");
+    crate::core::auth::write_private_file(&tmp_path, content_yml.as_bytes())?;
+    fs::rename(&tmp_path, &paths.config_file_path)?;
 
     Ok(())
   }

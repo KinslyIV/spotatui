@@ -19,6 +19,7 @@
 //! contains `:` and `/`; never re-split on `:`).
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use rand::seq::SliceRandom;
@@ -57,6 +58,13 @@ const USER_AGENT: &str = concat!("spotatui/", env!("CARGO_PKG_VERSION"));
 /// Result page size for directory searches — matches the subsonic search's
 /// songCount and roughly one screen of the songs block.
 const SEARCH_LIMIT: usize = 30;
+
+/// Per-mirror wall-clock cap. The mirror walk is on the serial IoEvent pump, so
+/// a mirror that connects then stalls the body must not hold up the whole walk
+/// (or every source's transport). Bounds each `get_from_any_mirror` attempt so a
+/// dead mirror really does "only cost one timeout" and the walk advances to the
+/// next mirror. Blankets both the connect and the body phases via a hard wrap.
+const MIRROR_TIMEOUT: Duration = Duration::from_secs(6);
 
 // ---------------------------------------------------------------------------
 // RadioPlaybackState
@@ -127,6 +135,11 @@ impl RadioSource {
     RadioSource {
       http: reqwest::Client::builder()
         .user_agent(USER_AGENT)
+        // Blanket per-request timeout so a mirror that connects then stalls the
+        // body can never hang the pump. The per-mirror `tokio::time::timeout` in
+        // `get_from_any_mirror` is the belt to this suspenders — it also bounds
+        // any phase reqwest's own timeout might not (DNS, connect races).
+        .timeout(MIRROR_TIMEOUT)
         .build()
         // Falls back to a default client only if TLS init fails, which would
         // break every other request in the app too.
@@ -168,9 +181,14 @@ impl RadioSource {
 
     let mut last_err = anyhow!("no radio-browser mirrors configured");
     for base in mirrors {
-      match self.get(&format!("{base}{path}")).await {
-        Ok(body) => return Ok(body),
-        Err(e) => last_err = e,
+      let url = format!("{base}{path}");
+      // Hard-bound each mirror attempt: even if reqwest's own timeout somehow
+      // does not fire (e.g. a stall in a phase it does not cover), this ensures
+      // one dead mirror costs at most `MIRROR_TIMEOUT` before the walk advances.
+      match tokio::time::timeout(MIRROR_TIMEOUT, self.get(&url)).await {
+        Ok(Ok(body)) => return Ok(body),
+        Ok(Err(e)) => last_err = e,
+        Err(_) => last_err = anyhow!("mirror {base} timed out after {MIRROR_TIMEOUT:?}"),
       }
     }
     Err(last_err.context("all radio-browser mirrors failed"))

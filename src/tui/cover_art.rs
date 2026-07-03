@@ -9,7 +9,6 @@ use ratatui_image::{
   protocol::StatefulProtocol,
   Resize, StatefulImage,
 };
-use rspotify::model::Image;
 use std::sync::Mutex;
 
 pub struct CoverArt {
@@ -65,50 +64,70 @@ impl CoverArt {
     *lock = Some(state);
   }
 
-  pub async fn refresh(&self, image: &Image) -> anyhow::Result<()> {
-    if self.get_url().as_ref() != Some(&image.url) {
-      info!("getting new cover art image...");
+  /// Downloads and decodes the cover-art image at `url`, off any external lock.
+  ///
+  /// This is a **self-free associated function** on purpose: it borrows neither
+  /// `self` nor any `App` state, so its `.await` points can be reached with the
+  /// `App` mutex fully dropped. The network fetch and the (synchronous, CPU-bound)
+  /// image decode are the expensive parts and must never run while the `App`
+  /// guard is held, or the render loop — which locks the same mutex every frame —
+  /// freezes for the whole CDN round-trip (#142).
+  ///
+  /// The reqwest client is built with explicit timeouts so a hung CDN cannot
+  /// stall the fetch forever even off-lock (`reqwest::get` uses a default client
+  /// with none).
+  pub async fn fetch_and_decode(url: &str) -> anyhow::Result<image::DynamicImage> {
+    info!("getting new cover art image...");
 
-      let res = match reqwest::get(&image.url).await {
-        Ok(r) => r.error_for_status(),
-        Err(e) => Result::Err(e),
-      };
+    let client = reqwest::Client::builder()
+      .connect_timeout(std::time::Duration::from_secs(10))
+      .timeout(std::time::Duration::from_secs(30))
+      .build()
+      .map_err(|e| anyhow!(e))?;
 
-      let file = match res {
-        Ok(res) => {
-          // Allocate Vec "file" with capacity if content_length is provided
-          let mut file = match res.content_length() {
-            Some(s) => Vec::with_capacity(s as usize),
-            None => Vec::new(),
-          };
+    let res = client
+      .get(url)
+      .send()
+      .await
+      .and_then(|r| r.error_for_status());
 
-          let bytes = res.bytes().await?;
-          file.extend_from_slice(&bytes);
+    let file = match res {
+      Ok(res) => {
+        // Allocate Vec "file" with capacity if content_length is provided
+        let mut file = match res.content_length() {
+          Some(s) => Vec::with_capacity(s as usize),
+          None => Vec::new(),
+        };
 
-          debug!("finished reading response: {} bytes", file.len());
-          file
-        }
-        Err(e) => return Err(anyhow!(e)),
-      };
+        let bytes = res.bytes().await?;
+        file.extend_from_slice(&bytes);
 
-      let img = image::load_from_memory(&file).map_err(|e| anyhow!(e))?;
-
-      // Create two separate protocol instances so the playbar and fullscreen
-      // views can render independently without conflicting.
-      let image_protocol = self.picker.new_resize_protocol(img.clone());
-      let fullscreen_protocol = self.picker.new_resize_protocol(img);
-
-      self.set_state(CoverArtState::new(image.url.clone(), image_protocol));
-      {
-        let mut lock = self.fullscreen_state.lock().unwrap();
-        *lock = Some(CoverArtState::new(image.url.clone(), fullscreen_protocol));
+        debug!("finished reading response: {} bytes", file.len());
+        file
       }
-      info!("got new cover art: {}", image.url);
-    } else {
-      debug!("skipping image refresh: cover art already downloaded");
-    }
+      Err(e) => return Err(anyhow!(e)),
+    };
 
-    Ok(())
+    image::load_from_memory(&file).map_err(|e| anyhow!(e))
+  }
+
+  /// Stores an already-decoded cover-art image into playbar + fullscreen state.
+  ///
+  /// Synchronous and cheap: `new_resize_protocol` defers the actual encoding to
+  /// render time. Call this under the (briefly re-acquired) `App` guard after
+  /// [`fetch_and_decode`] has done the slow work off-lock.
+  pub fn store_decoded(&self, url: String, img: image::DynamicImage) {
+    // Create two separate protocol instances so the playbar and fullscreen
+    // views can render independently without conflicting.
+    let image_protocol = self.picker.new_resize_protocol(img.clone());
+    let fullscreen_protocol = self.picker.new_resize_protocol(img);
+
+    self.set_state(CoverArtState::new(url.clone(), image_protocol));
+    {
+      let mut lock = self.fullscreen_state.lock().unwrap();
+      *lock = Some(CoverArtState::new(url.clone(), fullscreen_protocol));
+    }
+    info!("got new cover art: {url}");
   }
 
   pub fn available(&self) -> bool {
