@@ -261,7 +261,9 @@ never sits in the config file in plaintext.
 
 Stations come from your config list and from searching the radio-browser.info directory
 in-app (the search box searches stations while Radio is the active source; Enter plays one
-directly).
+directly). Press the save/like key (`F` by default) on a highlighted station, or while
+a radio stream is playing, to save it to `behavior.radio_stations` and show it in the
+Radio Stations sidebar. Highlight a saved sidebar station and press `D` to remove it.
 
 ```yaml
 behavior:

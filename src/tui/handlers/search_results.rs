@@ -3,6 +3,9 @@ use crate::core::app::{
   ActiveBlock, App, DialogContext, RecommendationsContext, RouteId, SearchResultBlock,
   TrackTableContext,
 };
+use crate::core::plugin_api::TrackInfo;
+use crate::core::source::Source;
+use crate::core::user_config::RadioStationAddOutcome;
 use crate::infra::network::IoEvent;
 use crate::tui::event::Key;
 use rspotify::model::idtypes::PlaylistId;
@@ -435,6 +438,88 @@ fn handle_recommended_tracks(app: &mut App) {
   }
 }
 
+fn selected_radio_station(app: &App) -> Option<TrackInfo> {
+  let index = app.search_results.selected_tracks_index?;
+  app
+    .search_results
+    .tracks
+    .as_ref()?
+    .items
+    .get(index)
+    .cloned()
+}
+
+/// Move `station` into the sidebar list under the favorited `name`/`url`,
+/// deduped by `radio:` URI. Takes ownership so the station is not cloned again.
+fn add_station_to_sidebar(app: &mut App, mut station: TrackInfo, name: String, url: &str) {
+  let uri = format!("{}{url}", super::RADIO_URI_PREFIX);
+  if app
+    .radio_stations
+    .iter()
+    .any(|existing| existing.uri.as_deref() == Some(uri.as_str()))
+  {
+    return;
+  }
+
+  station.name = name;
+  station.uri = Some(uri);
+  app.radio_stations.push(station);
+  if app.selected_playlist_index.is_none() {
+    app.selected_playlist_index = Some(0);
+  }
+}
+
+fn favorite_radio_station(app: &mut App, station: TrackInfo) {
+  let Some(url) = station.uri.as_deref().and_then(super::radio_stream_url) else {
+    app.set_status_message("Radio station has no stream URL".to_string(), 4);
+    return;
+  };
+
+  let trimmed = station.name.trim();
+  let name = if trimmed.is_empty() { url } else { trimmed }.to_string();
+  let url = url.to_string();
+
+  let message = match app.user_config.add_radio_station(&name, &url) {
+    Ok(RadioStationAddOutcome::Added) => format!("Favorited radio station: {name}"),
+    Ok(RadioStationAddOutcome::AlreadyExists) => {
+      format!("Radio station already favorited: {name}")
+    }
+    Err(error) => {
+      app.set_error_status_message(format!("Could not favorite radio station: {error}"), 6);
+      return;
+    }
+  };
+
+  add_station_to_sidebar(app, station, name, &url);
+  app.set_status_message(message, 4);
+}
+
+pub(super) fn favorite_selected_radio_station(app: &mut App) {
+  let Some(station) = selected_radio_station(app) else {
+    app.set_status_message("No radio station selected".to_string(), 4);
+    return;
+  };
+  favorite_radio_station(app, station);
+}
+
+#[cfg(feature = "internet-radio")]
+pub(super) fn favorite_current_radio_station(app: &mut App) -> bool {
+  let Some(station) = app
+    .radio_playback
+    .as_ref()
+    .map(|session| session.station.clone())
+  else {
+    return false;
+  };
+  favorite_radio_station(app, station);
+  true
+}
+
+#[cfg(not(feature = "internet-radio"))]
+pub(super) fn favorite_current_radio_station(_app: &mut App) -> bool {
+  false
+}
+
 /// Key handling for the internet-radio results view: a single full-area
 /// Stations panel (see `draw_radio_station_results`), backed by the
 /// `SongSearch` block. Navigation is pinned to that one block so focus can
@@ -474,6 +559,10 @@ fn handle_radio_key(key: Key, app: &mut App) {
       app.search_results.selected_block = SearchResultBlock::SongSearch;
       handle_low_press_on_selected_block(app);
     }
+    k if k == app.user_config.keys.like_track => {
+      app.search_results.selected_block = SearchResultBlock::SongSearch;
+      favorite_selected_radio_station(app);
+    }
     Key::Enter => {
       app.search_results.selected_block = SearchResultBlock::SongSearch;
       handle_enter_event_on_selected_block(app);
@@ -483,7 +572,7 @@ fn handle_radio_key(key: Key, app: &mut App) {
 }
 
 pub fn handler(key: Key, app: &mut App) {
-  if app.active_source == crate::core::source::Source::Radio {
+  if app.active_source == Source::Radio {
     handle_radio_key(key, app);
     return;
   }
@@ -662,8 +751,6 @@ mod tests {
   /// highlighted station.
   #[test]
   fn radio_results_pin_navigation_and_enter_plays_station() {
-    use crate::core::source::Source;
-
     let (tx, rx) = channel();
     let mut app = App::new(tx, UserConfig::new(), SystemTime::now());
     app.active_source = Source::Radio;
@@ -699,6 +786,44 @@ mod tests {
       }
       _ => panic!("expected a StartPlayback of the station uris"),
     }
+  }
+
+  #[test]
+  fn radio_results_favorite_key_saves_selected_station() {
+    use crate::core::user_config::UserConfigPaths;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut user_config = UserConfig::new();
+    user_config.path_to_config = Some(UserConfigPaths {
+      config_file_path: dir.path().join("config.yml"),
+    });
+    let (tx, _rx) = channel();
+    let mut app = App::new(tx, user_config, SystemTime::now());
+    app.active_source = Source::Radio;
+    app.search_results.tracks = Some(Paged {
+      items: vec![station(
+        "radio:https://ice1.somafm.com/groovesalad-128-mp3",
+        "Groove Salad",
+      )],
+      total: 1,
+      ..Default::default()
+    });
+    app.search_results.selected_tracks_index = Some(0);
+    app.push_navigation_stack(RouteId::Search, ActiveBlock::SearchResultBlock);
+
+    let favorite_key = app.user_config.keys.like_track;
+    handler(favorite_key, &mut app);
+
+    assert_eq!(app.user_config.behavior.radio_stations.len(), 1);
+    assert_eq!(
+      app.user_config.behavior.radio_stations[0].url,
+      "https://ice1.somafm.com/groovesalad-128-mp3"
+    );
+    assert_eq!(app.radio_stations.len(), 1);
+    assert_eq!(
+      app.status_message.as_deref(),
+      Some("Favorited radio station: Groove Salad")
+    );
   }
 
   #[test]

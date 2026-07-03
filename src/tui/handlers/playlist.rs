@@ -86,6 +86,42 @@ fn play_radio_station(app: &mut App) {
   }
 }
 
+fn remove_radio_station(app: &mut App) {
+  let Some(idx) = app.selected_playlist_index else {
+    app.set_status_message("No radio station selected".to_string(), 4);
+    return;
+  };
+  let Some(station) = app.radio_stations.get(idx).cloned() else {
+    app.set_status_message("No radio station selected".to_string(), 4);
+    return;
+  };
+  let Some(url) = station.uri.as_deref().and_then(super::radio_stream_url) else {
+    app.set_status_message("Radio station has no stream URL".to_string(), 4);
+    return;
+  };
+
+  match app.user_config.remove_radio_station_by_url(url) {
+    Ok(Some(removed)) => {
+      app.radio_stations.remove(idx);
+      app.selected_playlist_index = if app.radio_stations.is_empty() {
+        None
+      } else {
+        Some(idx.min(app.radio_stations.len() - 1))
+      };
+      app.set_status_message(format!("Removed radio station: {}", removed.name), 4);
+    }
+    Ok(None) => {
+      app.set_status_message(
+        format!("Radio station is not favorited: {}", station.name),
+        4,
+      );
+    }
+    Err(error) => {
+      app.set_error_status_message(format!("Could not remove radio station: {error}"), 6);
+    }
+  }
+}
+
 pub fn handler(key: Key, app: &mut App) {
   match key {
     k if common_key_events::right_event(k, &app.user_config.keys) => {
@@ -133,6 +169,9 @@ pub fn handler(key: Key, app: &mut App) {
     }
     Key::Enter if app.active_source == Source::Radio => {
       play_radio_station(app);
+    }
+    Key::Char('D') if app.active_source == Source::Radio => {
+      remove_radio_station(app);
     }
     Key::Enter if app.active_source == Source::YouTube => {
       open_youtube_playlist(app);
@@ -209,8 +248,9 @@ pub fn handler(key: Key, app: &mut App) {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::core::plugin_api::TrackInfo;
   use crate::core::test_helpers::playlist_info;
-  use crate::core::user_config::UserConfig;
+  use crate::core::user_config::{RadioStationConfig, UserConfig, UserConfigPaths};
   use std::sync::mpsc::channel;
   use std::time::SystemTime;
 
@@ -265,5 +305,74 @@ mod tests {
       IoEvent::GetLocalTracks(uri) => assert_eq!(uri, "file:///music/Jazz"),
       _ => panic!("expected local tracks fetch"),
     }
+  }
+
+  #[test]
+  fn shift_d_on_radio_station_removes_favorite_and_updates_sidebar() {
+    let dir = tempfile::tempdir().unwrap();
+    let (tx, _rx) = channel();
+    let mut config = UserConfig::new();
+    config.path_to_config = Some(UserConfigPaths {
+      config_file_path: dir.path().join("config.yml"),
+    });
+    config.behavior.radio_stations = vec![
+      RadioStationConfig {
+        name: "Groove Salad".to_string(),
+        url: "https://ice1.somafm.com/groovesalad-128-mp3".to_string(),
+      },
+      RadioStationConfig {
+        name: "Secret Agent".to_string(),
+        url: "https://ice1.somafm.com/secretagent-128-mp3".to_string(),
+      },
+    ];
+
+    let mut app = App::new(tx, config, SystemTime::now());
+    app.active_source = Source::Radio;
+    app.radio_stations = vec![
+      TrackInfo {
+        uri: Some("radio:https://ice1.somafm.com/groovesalad-128-mp3".to_string()),
+        name: "Groove Salad".to_string(),
+        artists: vec![],
+        album: String::new(),
+        duration_ms: 0,
+        id: None,
+        album_id: None,
+        artist_refs: vec![],
+        is_playable: true,
+        is_local: false,
+        track_number: 0,
+        explicit: false,
+      },
+      TrackInfo {
+        uri: Some("radio:https://ice1.somafm.com/secretagent-128-mp3".to_string()),
+        name: "Secret Agent".to_string(),
+        artists: vec![],
+        album: String::new(),
+        duration_ms: 0,
+        id: None,
+        album_id: None,
+        artist_refs: vec![],
+        is_playable: true,
+        is_local: false,
+        track_number: 0,
+        explicit: false,
+      },
+    ];
+    app.selected_playlist_index = Some(0);
+
+    handler(Key::Char('D'), &mut app);
+
+    assert_eq!(app.user_config.behavior.radio_stations.len(), 1);
+    assert_eq!(
+      app.user_config.behavior.radio_stations[0].url,
+      "https://ice1.somafm.com/secretagent-128-mp3"
+    );
+    assert_eq!(app.radio_stations.len(), 1);
+    assert_eq!(app.radio_stations[0].name, "Secret Agent");
+    assert_eq!(app.selected_playlist_index, Some(0));
+    assert_eq!(
+      app.status_message.as_deref(),
+      Some("Removed radio station: Groove Salad")
+    );
   }
 }

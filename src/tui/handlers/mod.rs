@@ -68,6 +68,21 @@ fn open_settings(app: &mut App) {
   app.push_navigation_stack(RouteId::Settings, ActiveBlock::Settings);
 }
 
+/// The `radio:` URI scheme shared across handlers. The canonical parser in
+/// `crate::infra::radio` lives behind the `internet-radio` feature, so the
+/// favoriting handlers (which persist config even in slim builds) keep this one
+/// ungated copy rather than duplicating it per file.
+pub(super) const RADIO_URI_PREFIX: &str = "radio:";
+
+/// Strip the `radio:` prefix off a station URI and return the trimmed,
+/// non-empty stream URL.
+pub(super) fn radio_stream_url(uri: &str) -> Option<&str> {
+  uri
+    .strip_prefix(RADIO_URI_PREFIX)
+    .map(str::trim)
+    .filter(|url| !url.is_empty())
+}
+
 fn should_route_friends_before_globals(key: Key, app: &App) -> bool {
   if app.get_current_route().active_block != ActiveBlock::Friends {
     return false;
@@ -287,6 +302,12 @@ pub fn handle_app(key: Key, app: &mut App) {
     _ if key == app.user_config.keys.like_track => {
       if is_input_mode(app) {
         handle_block_events(key, app);
+      } else if app.active_source == Source::Radio {
+        if app.get_current_route().active_block == ActiveBlock::SearchResultBlock {
+          handle_block_events(key, app);
+        } else if !search_results::favorite_current_radio_station(app) {
+          app.set_status_message("No radio station selected or playing".to_string(), 4);
+        }
       } else if app.active_source.supports_like() {
         playbar::toggle_like_currently_playing_item(app);
       } else {
@@ -998,6 +1019,53 @@ mod tests {
     assert_ne!(
       app.status_message.as_deref(),
       Some("Like isn't available for Local Files")
+    );
+  }
+
+  #[test]
+  fn global_like_key_favorites_radio_search_station() {
+    use crate::core::pagination::Paged;
+    use crate::core::plugin_api::TrackInfo;
+    use crate::core::user_config::UserConfigPaths;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = App::default();
+    app.active_source = Source::Radio;
+    app.user_config.path_to_config = Some(UserConfigPaths {
+      config_file_path: dir.path().join("config.yml"),
+    });
+    app.search_results.tracks = Some(Paged {
+      items: vec![TrackInfo {
+        uri: Some("radio:https://example.com/stream".to_string()),
+        name: "Example FM".to_string(),
+        artists: vec![],
+        album: String::new(),
+        duration_ms: 0,
+        id: None,
+        album_id: None,
+        artist_refs: vec![],
+        is_playable: true,
+        is_local: false,
+        track_number: 0,
+        explicit: false,
+      }],
+      total: 1,
+      ..Default::default()
+    });
+    app.search_results.selected_tracks_index = Some(0);
+    app.push_navigation_stack(RouteId::Search, ActiveBlock::SearchResultBlock);
+
+    let favorite_key = app.user_config.keys.like_track;
+    handle_app(favorite_key, &mut app);
+
+    assert_eq!(app.user_config.behavior.radio_stations.len(), 1);
+    assert_eq!(
+      app.user_config.behavior.radio_stations[0].url,
+      "https://example.com/stream"
+    );
+    assert_eq!(
+      app.status_message.as_deref(),
+      Some("Favorited radio station: Example FM")
     );
   }
 

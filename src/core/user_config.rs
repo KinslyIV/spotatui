@@ -728,6 +728,12 @@ pub struct RadioStationConfig {
   pub url: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RadioStationAddOutcome {
+  Added,
+  AlreadyExists,
+}
+
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BehaviorConfigString {
   pub seek_milliseconds: Option<u32>,
@@ -1720,6 +1726,71 @@ impl UserConfig {
     format!("{} ", &self.behavior.liked_icon)
   }
 
+  pub fn add_radio_station(
+    &mut self,
+    name: impl AsRef<str>,
+    url: impl AsRef<str>,
+  ) -> Result<RadioStationAddOutcome> {
+    let name = name.as_ref().trim();
+    let url = url.as_ref().trim();
+
+    if name.is_empty() {
+      return Err(anyhow!("Radio station name is empty"));
+    }
+    if url.is_empty() {
+      return Err(anyhow!("Radio station URL is empty"));
+    }
+
+    if self
+      .behavior
+      .radio_stations
+      .iter()
+      .any(|station| station.url.trim() == url)
+    {
+      return Ok(RadioStationAddOutcome::AlreadyExists);
+    }
+
+    self.behavior.radio_stations.push(RadioStationConfig {
+      name: name.to_string(),
+      url: url.to_string(),
+    });
+
+    if let Err(error) = self.save_config() {
+      self.behavior.radio_stations.pop();
+      return Err(error);
+    }
+
+    Ok(RadioStationAddOutcome::Added)
+  }
+
+  pub fn remove_radio_station_by_url(
+    &mut self,
+    url: impl AsRef<str>,
+  ) -> Result<Option<RadioStationConfig>> {
+    let url = url.as_ref().trim();
+    if url.is_empty() {
+      return Err(anyhow!("Radio station URL is empty"));
+    }
+
+    let Some(index) = self
+      .behavior
+      .radio_stations
+      .iter()
+      .position(|station| station.url.trim() == url)
+    else {
+      return Ok(None);
+    };
+
+    let removed = self.behavior.radio_stations.remove(index);
+
+    if let Err(error) = self.save_config() {
+      self.behavior.radio_stations.insert(index, removed);
+      return Err(error);
+    }
+
+    Ok(Some(removed))
+  }
+
   pub fn mark_announcement_seen(&mut self, announcement_id: impl Into<String>) {
     let id = announcement_id.into();
     if id.is_empty() {
@@ -2130,6 +2201,124 @@ radio_stations:
     let mut config = UserConfig::new();
     config.load_behaviorconfig(behavior).unwrap();
     assert!(config.behavior.radio_stations.is_empty());
+  }
+
+  #[test]
+  fn adding_radio_station_persists_trimmed_unique_entry() {
+    use super::{
+      RadioStationAddOutcome, RadioStationConfig, UserConfig, UserConfigPaths, UserConfigString,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.yml");
+    let mut config = UserConfig::new();
+    config.path_to_config = Some(UserConfigPaths {
+      config_file_path: config_path.clone(),
+    });
+
+    let outcome = config
+      .add_radio_station(
+        " SomaFM Groove Salad ",
+        " https://ice1.somafm.com/groovesalad-128-mp3 ",
+      )
+      .unwrap();
+    assert_eq!(outcome, RadioStationAddOutcome::Added);
+    assert_eq!(
+      config.behavior.radio_stations,
+      vec![RadioStationConfig {
+        name: "SomaFM Groove Salad".to_string(),
+        url: "https://ice1.somafm.com/groovesalad-128-mp3".to_string(),
+      }]
+    );
+
+    let saved = std::fs::read_to_string(config_path).unwrap();
+    let saved: UserConfigString = serde_yaml::from_str(&saved).unwrap();
+    assert_eq!(
+      saved
+        .behavior
+        .unwrap()
+        .radio_stations
+        .unwrap()
+        .first()
+        .cloned(),
+      Some(RadioStationConfig {
+        name: "SomaFM Groove Salad".to_string(),
+        url: "https://ice1.somafm.com/groovesalad-128-mp3".to_string(),
+      })
+    );
+  }
+
+  #[test]
+  fn adding_radio_station_dedupes_by_stream_url() {
+    use super::{RadioStationAddOutcome, RadioStationConfig, UserConfig, UserConfigPaths};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = UserConfig::new();
+    config.path_to_config = Some(UserConfigPaths {
+      config_file_path: dir.path().join("config.yml"),
+    });
+    config.behavior.radio_stations = vec![RadioStationConfig {
+      name: "Existing".to_string(),
+      url: "https://ice1.somafm.com/groovesalad-128-mp3".to_string(),
+    }];
+
+    let outcome = config
+      .add_radio_station(
+        "Duplicate Name",
+        " https://ice1.somafm.com/groovesalad-128-mp3 ",
+      )
+      .unwrap();
+
+    assert_eq!(outcome, RadioStationAddOutcome::AlreadyExists);
+    assert_eq!(config.behavior.radio_stations.len(), 1);
+    assert_eq!(config.behavior.radio_stations[0].name, "Existing");
+  }
+
+  #[test]
+  fn removing_radio_station_persists_by_stream_url() {
+    use super::{RadioStationConfig, UserConfig, UserConfigPaths, UserConfigString};
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.yml");
+    let mut config = UserConfig::new();
+    config.path_to_config = Some(UserConfigPaths {
+      config_file_path: config_path.clone(),
+    });
+    config.behavior.radio_stations = vec![
+      RadioStationConfig {
+        name: "Groove Salad".to_string(),
+        url: "https://ice1.somafm.com/groovesalad-128-mp3".to_string(),
+      },
+      RadioStationConfig {
+        name: "Secret Agent".to_string(),
+        url: "https://ice1.somafm.com/secretagent-128-mp3".to_string(),
+      },
+    ];
+
+    let removed = config
+      .remove_radio_station_by_url(" https://ice1.somafm.com/groovesalad-128-mp3 ")
+      .unwrap();
+
+    assert_eq!(
+      removed.map(|station| station.name),
+      Some("Groove Salad".to_string())
+    );
+    assert_eq!(config.behavior.radio_stations.len(), 1);
+    assert_eq!(config.behavior.radio_stations[0].name, "Secret Agent");
+
+    let saved = std::fs::read_to_string(config_path).unwrap();
+    let saved: UserConfigString = serde_yaml::from_str(&saved).unwrap();
+    assert_eq!(
+      saved
+        .behavior
+        .unwrap()
+        .radio_stations
+        .unwrap()
+        .iter()
+        .map(|station| station.name.as_str())
+        .collect::<Vec<_>>(),
+      vec!["Secret Agent"]
+    );
   }
 
   #[test]
