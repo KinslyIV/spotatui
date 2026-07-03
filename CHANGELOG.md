@@ -15,6 +15,7 @@
 - **Crash fix**: Pressing `D` (unfollow) on a playlist search result after a newer, shorter search no longer panics; selected indices are clamped when result pages are replaced.
 - **Subsonic memory use**: Track downloads now stream to disk chunk-by-chunk instead of buffering the whole file in RAM (large lossless files/audiobooks no longer spike memory per track change).
 - **Config file permissions**: The config file (which can hold the Subsonic password and party sync token) is now written with `0600` permissions via an atomic temp-file-and-rename, and the config directory is restricted to `0700`, on Unix.
+- **MPRIS volume control**: `playerctl volume` (and other MPRIS clients) can now actually set spotatui's volume — previously only reads worked, since no `connect_set_volume` handler was ever registered. Volume changes made via the native streaming fast path (keyboard, Lua) now also sync back to the MPRIS `Volume` property immediately, so relative adjustments like `playerctl volume 0.05+` no longer compute from a stale cached value ([#327](https://github.com/LargeModGames/spotatui/issues/327)).
 
 ### Added
 

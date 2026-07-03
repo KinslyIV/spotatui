@@ -1804,6 +1804,10 @@ async fn handle_mpris_events(
         }
         app_lock.dispatch(IoEvent::Repeat(repeat_state));
       }
+      MprisEvent::SetVolume(volume_percent) => {
+        let mut app_lock = app.lock().await;
+        app_lock.set_volume_percent(volume_percent);
+      }
     }
   }
 }
@@ -1873,9 +1877,10 @@ async fn route_local_mpris_event(
       mpris_manager.emit_seeked(new_position_ms as u64);
       true
     }
-    // Shuffle/loop don't apply to single-file local playback; leave them to the
-    // existing Spotify-targeted handling.
-    MprisEvent::SetShuffle(_) | MprisEvent::SetLoopStatus(_) => false,
+    // Shuffle/loop don't apply to single-file local playback. Volume is handled
+    // by the top-level `set_volume_percent`, which already routes to whichever
+    // decoded source owns the sink. Leave all three to the existing handling.
+    MprisEvent::SetShuffle(_) | MprisEvent::SetLoopStatus(_) | MprisEvent::SetVolume(_) => false,
   }
 }
 
