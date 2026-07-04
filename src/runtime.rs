@@ -1589,6 +1589,13 @@ async fn start_tokio(io_rx: std::sync::mpsc::Receiver<IoEvent>, network: &mut Ne
         let handled_youtube = false;
         if !handled_locally && !handled_subsonic && !handled_radio && !handled_youtube {
           network.handle_network_event(io_event).await;
+        } else {
+          // A source router consumed the event and returned without touching
+          // `is_loading`, which `App::dispatch` set to true. Only
+          // `handle_network_event` resets it, and we skipped that path, so clear
+          // it here — otherwise selecting/loading Local, Subsonic, Radio, or
+          // YouTube content leaves the UI stuck on the loading indicator.
+          network.app.lock().await.is_loading = false;
         }
       }
       Err(std::sync::mpsc::TryRecvError::Empty) => {
@@ -1620,13 +1627,19 @@ async fn handle_mpris_events(
       continue;
     }
 
-    // Local-file playback owns the session: route transport through the same
-    // IoEvents the keyboard uses (intercepted by route_local_event before the
-    // Spotify network) so media keys follow local instead of librespot. This
-    // must run *before* the streaming-player branches below, since librespot is
-    // initialized even while a local file is playing.
-    #[cfg(feature = "local-files")]
-    if route_local_mpris_event(&event, &app, &mpris_manager).await {
+    // A decoded source (local file, Subsonic, radio, or YouTube) owns the
+    // session: route transport through the same IoEvents the keyboard uses
+    // (intercepted by the per-source route_*_event dispatchers before the
+    // Spotify network) so media keys follow the audible source instead of
+    // librespot. This must run *before* the streaming-player branches below,
+    // since librespot is initialized even while a decoded source is playing.
+    #[cfg(any(
+      feature = "local-files",
+      feature = "subsonic",
+      feature = "internet-radio",
+      feature = "youtube"
+    ))]
+    if route_decoded_mpris_event(&event, &app, &mpris_manager).await {
       continue;
     }
 
@@ -1812,16 +1825,28 @@ async fn handle_mpris_events(
   }
 }
 
-/// Route an MPRIS transport event through the standard local-playback dispatch
-/// path when a local file owns the session.
+/// Route an MPRIS transport event through the standard dispatch path when any
+/// decoded source (local file, Subsonic, internet radio, or YouTube) owns the
+/// session.
 ///
-/// Returns `true` if the event was handled locally (and the caller must skip
-/// the Spotify/librespot branches). Play/pause/next/previous/stop/seek map onto
-/// the same `IoEvent`s the keyboard uses; `route_local_event` intercepts them
-/// before the Spotify network. Non-transport events (shuffle/loop) return
-/// `false` so existing behaviour is preserved.
-#[cfg(all(feature = "mpris", target_os = "linux", feature = "local-files"))]
-async fn route_local_mpris_event(
+/// Returns `true` if the event was consumed (and the caller must skip the
+/// Spotify/librespot branches). Play/pause/next/previous/stop/seek map onto the
+/// same `IoEvent`s the keyboard uses; the per-source `route_*_event` dispatchers
+/// intercept them before the Spotify network, so the control lands on whichever
+/// source is actually audible instead of the paused librespot session.
+/// Non-transport events (shuffle/loop) return `false` so existing behaviour is
+/// preserved.
+#[cfg(all(
+  feature = "mpris",
+  target_os = "linux",
+  any(
+    feature = "local-files",
+    feature = "subsonic",
+    feature = "internet-radio",
+    feature = "youtube"
+  )
+))]
+async fn route_decoded_mpris_event(
   event: &mpris::MprisEvent,
   app: &Arc<Mutex<App>>,
   mpris_manager: &Arc<mpris::MprisManager>,
@@ -1829,13 +1854,13 @@ async fn route_local_mpris_event(
   use mpris::MprisEvent;
 
   let mut app_lock = app.lock().await;
-  // Read the live local player state up front, then drop the borrow so the
+  // Read the live source-player state up front, then drop the borrow so the
   // immutable read does not conflict with the `&mut self` dispatch calls below.
-  let Some(local) = app_lock.local_playback.as_ref() else {
+  let Some(player) = app_lock.active_decoded_player() else {
     return false;
   };
-  let is_paused = local.player.is_paused();
-  let position_ms = local.player.position().as_millis() as i64;
+  let is_paused = player.is_paused();
+  let position_ms = player.position().as_millis() as i64;
 
   match event {
     MprisEvent::PlayPause => {
@@ -1900,13 +1925,19 @@ async fn handle_macos_media_events(
       continue;
     }
 
-    // Local-file playback owns the session: route transport through the same
-    // IoEvents the keyboard uses (intercepted by route_local_event before the
-    // Spotify network) so media keys follow local instead of librespot. This
-    // must run *before* `active_streaming_player` below, since librespot stays
-    // active even while a local file is playing.
-    #[cfg(feature = "local-files")]
-    if route_local_macos_event(&event, &app).await {
+    // A decoded source (local file, Subsonic, radio, or YouTube) owns the
+    // session: route transport through the same IoEvents the keyboard uses
+    // (intercepted by the per-source route_*_event dispatchers before the
+    // Spotify network) so media keys follow the audible source instead of
+    // librespot. This must run *before* `active_streaming_player` below, since
+    // librespot stays active even while a decoded source is playing.
+    #[cfg(any(
+      feature = "local-files",
+      feature = "subsonic",
+      feature = "internet-radio",
+      feature = "youtube"
+    ))]
+    if route_decoded_macos_event(&event, &app).await {
       continue;
     }
 
@@ -1948,27 +1979,38 @@ async fn handle_macos_media_events(
   }
 }
 
-/// Route a macOS media transport event through the standard local-playback
-/// dispatch path when a local file owns the session.
+/// Route a macOS media transport event through the standard dispatch path when
+/// any decoded source (local file, Subsonic, internet radio, or YouTube) owns
+/// the session.
 ///
-/// Returns `true` if the event was handled locally (and the caller must skip
-/// the streaming-player branches). Play/pause/next/previous/stop map onto the
-/// same `IoEvent`s the keyboard uses; `route_local_event` intercepts them
-/// before the Spotify network.
-#[cfg(all(feature = "macos-media", target_os = "macos", feature = "local-files"))]
-async fn route_local_macos_event(
+/// Returns `true` if the event was consumed (and the caller must skip the
+/// streaming-player branches). Play/pause/next/previous/stop map onto the same
+/// `IoEvent`s the keyboard uses; the per-source `route_*_event` dispatchers
+/// intercept them before the Spotify network, so the control lands on whichever
+/// source is actually audible instead of the paused librespot session.
+#[cfg(all(
+  feature = "macos-media",
+  target_os = "macos",
+  any(
+    feature = "local-files",
+    feature = "subsonic",
+    feature = "internet-radio",
+    feature = "youtube"
+  )
+))]
+async fn route_decoded_macos_event(
   event: &macos_media::MacMediaEvent,
   app: &Arc<Mutex<App>>,
 ) -> bool {
   use macos_media::MacMediaEvent;
 
   let mut app_lock = app.lock().await;
-  // Read the live local player state up front, then drop the borrow so the
+  // Read the live source-player state up front, then drop the borrow so the
   // immutable read does not conflict with the `&mut self` dispatch calls below.
-  let Some(local) = app_lock.local_playback.as_ref() else {
+  let Some(player) = app_lock.active_decoded_player() else {
     return false;
   };
-  let is_paused = local.player.is_paused();
+  let is_paused = player.is_paused();
 
   match event {
     MacMediaEvent::PlayPause => {
@@ -2005,6 +2047,23 @@ async fn handle_windows_media_events(
     if !app.lock().await.user_config.behavior.enable_media_keys {
       continue;
     }
+
+    // A decoded source (local file, Subsonic, radio, or YouTube) owns the
+    // session: route transport through the same IoEvents the keyboard uses
+    // (intercepted by the per-source route_*_event dispatchers before the
+    // Spotify network) so SMTC controls follow the audible source instead of
+    // librespot. This must run *before* the streaming-player branches below,
+    // since librespot stays active even while a decoded source is playing.
+    #[cfg(any(
+      feature = "local-files",
+      feature = "subsonic",
+      feature = "internet-radio",
+      feature = "youtube"
+    ))]
+    if route_decoded_windows_event(&event, &app).await {
+      continue;
+    }
+
     let player_opt = player::active_streaming_player(&app).await;
 
     let is_native_loaded = app.lock().await.native_track_info.is_some();
@@ -2069,6 +2128,59 @@ async fn handle_windows_media_events(
       }
     }
   }
+}
+
+/// Route a Windows SMTC media transport event through the standard dispatch
+/// path when any decoded source (local file, Subsonic, internet radio, or
+/// YouTube) owns the session.
+///
+/// Returns `true` if the event was consumed (and the caller must skip the
+/// streaming-player branches). Play/pause/next/previous/stop/seek map onto the
+/// same `IoEvent`s the keyboard uses; the per-source `route_*_event` dispatchers
+/// intercept them before the Spotify network, so the control lands on whichever
+/// source is actually audible instead of the paused librespot session.
+#[cfg(all(
+  feature = "windows-media",
+  target_os = "windows",
+  any(
+    feature = "local-files",
+    feature = "subsonic",
+    feature = "internet-radio",
+    feature = "youtube"
+  )
+))]
+async fn route_decoded_windows_event(
+  event: &smtc_tokio::WindowsMediaEvent,
+  app: &Arc<Mutex<App>>,
+) -> bool {
+  use smtc_tokio::WindowsMediaEvent;
+
+  let mut app_lock = app.lock().await;
+  // Only consume the event while a decoded source owns the session; otherwise
+  // fall through to the streaming-player branches for Spotify/librespot.
+  if app_lock.active_decoded_player().is_none() {
+    return false;
+  }
+
+  match event {
+    WindowsMediaEvent::Play => {
+      app_lock.dispatch(IoEvent::StartPlayback(None, None, None));
+    }
+    WindowsMediaEvent::Pause | WindowsMediaEvent::Stop => {
+      app_lock.dispatch(IoEvent::PausePlayback);
+    }
+    WindowsMediaEvent::Next => {
+      app_lock.dispatch(IoEvent::NextTrack);
+    }
+    WindowsMediaEvent::Previous => {
+      app_lock.dispatch(IoEvent::PreviousTrack);
+    }
+    WindowsMediaEvent::SetPosition(pos) => {
+      app_lock.song_progress_ms = *pos as u128;
+      app_lock.dispatch(IoEvent::Seek(*pos as u32));
+    }
+  }
+  true
 }
 
 #[cfg(test)]

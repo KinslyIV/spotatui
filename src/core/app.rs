@@ -2606,6 +2606,37 @@ impl App {
     false
   }
 
+  /// The player of whichever decoded source (local file, Subsonic, internet
+  /// radio, or YouTube) currently owns the session, or `None` when Spotify (or
+  /// nothing) owns it. All four sources decode through the same `LocalPlayer`
+  /// sink, so a single accessor covers transport/seek routing for every one.
+  /// Ordering mirrors [`Self::active_decoded_source`].
+  #[cfg(any(
+    feature = "local-files",
+    feature = "subsonic",
+    feature = "internet-radio",
+    feature = "youtube"
+  ))]
+  pub fn active_decoded_player(&self) -> Option<&std::sync::Arc<crate::infra::audio::LocalPlayer>> {
+    #[cfg(feature = "local-files")]
+    if let Some(s) = &self.local_playback {
+      return Some(&s.player);
+    }
+    #[cfg(feature = "subsonic")]
+    if let Some(s) = &self.subsonic_playback {
+      return Some(&s.player);
+    }
+    #[cfg(feature = "internet-radio")]
+    if let Some(s) = &self.radio_playback {
+      return Some(&s.player);
+    }
+    #[cfg(feature = "youtube")]
+    if let Some(s) = &self.youtube_playback {
+      return Some(&s.player);
+    }
+    None
+  }
+
   /// The current playback position, in milliseconds, of the active *seekable*
   /// decoded source (local file, Subsonic, or YouTube).
   ///
