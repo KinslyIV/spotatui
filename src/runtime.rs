@@ -56,7 +56,14 @@ use log::warn;
 use rspotify::{model::user::PrivateUser, AuthCodePkceSpotify};
 #[cfg(feature = "streaming")]
 use std::path::Path;
-#[cfg(feature = "streaming")]
+// Used by the streaming OAuth timeout and by `restore_playback_session`'s
+// per-source position seeks.
+#[cfg(any(
+  feature = "streaming",
+  feature = "local-files",
+  feature = "subsonic",
+  feature = "youtube"
+))]
 use std::time::Duration;
 use std::{
   fs,

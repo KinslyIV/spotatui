@@ -596,7 +596,16 @@ fn draw_cover_art_content(f: &mut Frame<'_>, app: &App, area: Rect) {
   let (track_name, artist_str) = extract_track_info(app);
 
   if !app.cover_art.available() {
-    let p = Paragraph::new("No cover art available")
+    use crate::core::app::CoverArtStatus;
+    // No image is loaded: show an explicit message for the current state rather
+    // than a blank pane, so "no art" always reads as a deliberate outcome.
+    let message = match app.cover_art_status {
+      CoverArtStatus::Loading => "Loading cover art...",
+      CoverArtStatus::Unavailable => "No cover art for this source",
+      CoverArtStatus::Failed => "Cover art unavailable",
+      CoverArtStatus::Loaded | CoverArtStatus::NotStarted => "No cover art available",
+    };
+    let p = Paragraph::new(message)
       .style(Style::default().fg(Color::Rgb(100, 100, 100)))
       .alignment(Alignment::Center);
 
@@ -682,28 +691,16 @@ fn draw_cover_art_content(f: &mut Frame<'_>, app: &App, area: Rect) {
 
 #[cfg(feature = "cover-art")]
 fn extract_track_info(app: &App) -> (Option<String>, Option<String>) {
-  use rspotify::model::PlayableItem;
-
-  // Prefer native track info (more responsive after skipping tracks)
-  if let Some(ref native_info) = app.native_track_info {
-    return (
-      Some(native_info.name.clone()),
-      Some(native_info.artists_display.clone()),
-    );
+  // Read from the source-agnostic snapshot so the fullscreen cover view labels
+  // the current track for every source (Spotify, native streaming, local files,
+  // Subsonic, radio, YouTube), not just Spotify.
+  match crate::infra::media_metadata::current_playback_snapshot(app) {
+    Some(snapshot) => (
+      Some(snapshot.metadata.title.clone()),
+      Some(snapshot.primary_artist()),
+    ),
+    None => (None, None),
   }
-
-  if let Some(ctx) = &app.current_playback_context {
-    if let Some(track_item) = &ctx.item {
-      let (name, artists) = match track_item {
-        PlayableItem::Track(track) => (track.name.clone(), create_artist_string(&track.artists)),
-        PlayableItem::Episode(episode) => (episode.name.clone(), episode.show.name.clone()),
-        _ => return (None, None),
-      };
-      return (Some(name), Some(artists));
-    }
-  }
-
-  (None, None)
 }
 
 fn draw_lyrics(f: &mut Frame<'_>, app: &App, area: Rect) {
@@ -1045,6 +1042,14 @@ fn render_local_playbar(f: &mut Frame<'_>, app: &App, layout_chunk: Rect, view: 
       Style::default().fg(app.user_config.theme.playbar_progress_text),
     ));
   f.render_widget(song_progress, playbar_areas.progress_area);
+
+  // Paint the cover art into the slot `playbar_layout_areas` reserved — the
+  // layout only carves out the space; without this the sources' playbar shows
+  // a blank indent where the image belongs (Spotify's path does the same).
+  #[cfg(feature = "cover-art")]
+  if let Some(cover_art) = playbar_areas.cover_art {
+    app.cover_art.render(f, cover_art);
+  }
 }
 
 pub fn draw_playbar(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {

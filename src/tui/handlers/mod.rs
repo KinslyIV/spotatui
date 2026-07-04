@@ -1048,6 +1048,7 @@ mod tests {
         is_local: false,
         track_number: 0,
         explicit: false,
+        image_url: None,
       }],
       total: 1,
       ..Default::default()

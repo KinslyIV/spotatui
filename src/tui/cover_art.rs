@@ -11,6 +11,35 @@ use ratatui_image::{
 };
 use std::sync::Mutex;
 
+/// What to fetch for the current track's cover art. Built once per track change
+/// by the shared detector and handled off the `App` lock in the network layer.
+#[derive(Clone, Debug)]
+pub enum CoverArtRequest {
+  /// Download and decode an image from a URL (Spotify album art, YouTube
+  /// thumbnail, Subsonic getCoverArt).
+  Url(String),
+  /// Read the embedded cover picture out of a local audio file. `key` is the
+  /// track's `file://` URI (used as the cache identity); `path` is the resolved
+  /// filesystem path handed to the blocking tag reader.
+  #[cfg(feature = "local-files")]
+  LocalFile {
+    key: String,
+    path: std::path::PathBuf,
+  },
+}
+
+impl CoverArtRequest {
+  /// The cache-identity key for this request: the image URL, or the file URI.
+  /// Used to skip re-fetching art already held for the same track.
+  pub fn key(&self) -> &str {
+    match self {
+      CoverArtRequest::Url(url) => url,
+      #[cfg(feature = "local-files")]
+      CoverArtRequest::LocalFile { key, .. } => key,
+    }
+  }
+}
+
 pub struct CoverArt {
   pub state: Mutex<Option<CoverArtState>>,
   /// Separate protocol state for fullscreen cover art view, avoiding conflicts
@@ -132,6 +161,15 @@ impl CoverArt {
 
   pub fn available(&self) -> bool {
     self.state.lock().unwrap().is_some()
+  }
+
+  /// Drop any stored cover art (both the playbar and fullscreen protocol state)
+  /// so the pane renders nothing. Used when switching to a track/source with no
+  /// art, or after a failed fetch, so stale art from the previous track can
+  /// never linger on screen.
+  pub fn clear(&self) {
+    *self.state.lock().unwrap() = None;
+    *self.fullscreen_state.lock().unwrap() = None;
   }
 
   pub fn render(&self, f: &mut Frame, area: Rect) {

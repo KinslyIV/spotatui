@@ -607,6 +607,27 @@ pub enum LyricsStatus {
   NotFound,
 }
 
+/// Status of the currently-playing track's cover art, mirroring [`LyricsStatus`].
+/// Drives the placeholder message shown when art can't be displayed, so a
+/// missing image reads as an explicit state rather than silently showing
+/// nothing (or, worse, the previous track's art).
+#[cfg(feature = "cover-art")]
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub enum CoverArtStatus {
+  /// Nothing is playing / no art has been requested yet.
+  #[default]
+  NotStarted,
+  /// A fetch/decode for the current track is in flight.
+  Loading,
+  /// Art for the current track is loaded and rendering.
+  Loaded,
+  /// The current source has no cover art to show (e.g. internet radio, or a
+  /// local file with no embedded picture).
+  Unavailable,
+  /// A fetch/decode was attempted for the current track but failed.
+  Failed,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NativePlaybackOrigin {
   Context,
@@ -812,6 +833,9 @@ pub struct App {
   pub queue_selected_index: usize,
   #[cfg(feature = "cover-art")]
   pub cover_art: crate::tui::cover_art::CoverArt,
+  /// Status of the current track's cover art, driving the placeholder message.
+  #[cfg(feature = "cover-art")]
+  pub cover_art_status: CoverArtStatus,
   // Inputs:
   // input is the string for input;
   // input_idx is the index of the cursor in terms of character;
@@ -1315,6 +1339,8 @@ impl Default for App {
       mpris_manager: None,
       #[cfg(feature = "cover-art")]
       cover_art: crate::tui::cover_art::CoverArt::new(),
+      #[cfg(feature = "cover-art")]
+      cover_art_status: CoverArtStatus::default(),
       friends: Vec::new(),
       friends_loading: false,
       friend_code: None,
@@ -2617,6 +2643,16 @@ impl App {
     feature = "internet-radio",
     feature = "youtube"
   ))]
+  // Consumed only by the OS media integrations (MPRIS / macOS / Windows), so
+  // builds with decoded sources but none of those integrations leave it unused.
+  #[cfg_attr(
+    not(any(
+      all(feature = "mpris", target_os = "linux"),
+      all(feature = "macos-media", target_os = "macos"),
+      all(feature = "windows-media", target_os = "windows")
+    )),
+    allow(dead_code)
+  )]
   pub fn active_decoded_player(&self) -> Option<&std::sync::Arc<crate::infra::audio::LocalPlayer>> {
     #[cfg(feature = "local-files")]
     if let Some(s) = &self.local_playback {

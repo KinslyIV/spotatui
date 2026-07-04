@@ -96,6 +96,8 @@ impl From<&FullTrack> for TrackInfo {
       is_local: t.is_local,
       track_number: t.track_number,
       explicit: t.explicit,
+      // Spotify cover art is resolved separately from album images, not here.
+      image_url: None,
     }
   }
 }
@@ -123,6 +125,8 @@ impl From<&SimplifiedTrack> for TrackInfo {
       is_local: t.is_local,
       track_number: t.track_number,
       explicit: t.explicit,
+      // Spotify cover art is resolved separately from album images, not here.
+      image_url: None,
     }
   }
 }

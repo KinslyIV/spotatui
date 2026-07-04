@@ -275,6 +275,7 @@ fn station_to_track_info(s: &RbStation) -> TrackInfo {
     is_local: false,
     track_number: 0,
     explicit: false,
+    image_url: None,
   }
 }
 
@@ -293,6 +294,7 @@ pub fn config_station_to_track_info(name: &str, url: &str) -> TrackInfo {
     is_local: false,
     track_number: 0,
     explicit: false,
+    image_url: None,
   }
 }
 

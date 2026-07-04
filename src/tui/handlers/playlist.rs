@@ -342,6 +342,7 @@ mod tests {
         is_local: false,
         track_number: 0,
         explicit: false,
+        image_url: None,
       },
       TrackInfo {
         uri: Some("radio:https://ice1.somafm.com/secretagent-128-mp3".to_string()),
@@ -356,6 +357,7 @@ mod tests {
         is_local: false,
         track_number: 0,
         explicit: false,
+        image_url: None,
       },
     ];
     app.selected_playlist_index = Some(0);

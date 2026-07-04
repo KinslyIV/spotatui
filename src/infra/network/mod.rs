@@ -208,6 +208,13 @@ pub enum IoEvent {
   /// Remove a video (bare id or `youtube:` URI) from a local YouTube playlist.
   #[cfg_attr(not(feature = "youtube"), allow(dead_code))]
   RemoveTrackFromYouTubePlaylist(String, String),
+  /// Fetch and decode the current track's cover art (album-art URL, source
+  /// thumbnail, or a local file's embedded picture). Dispatched by the shared
+  /// track-change detector; handled off the `App` lock so the render loop never
+  /// blocks on the download/decode. Source-agnostic and independent of Spotify
+  /// auth.
+  #[cfg(feature = "cover-art")]
+  FetchCoverArt(crate::tui::cover_art::CoverArtRequest),
 }
 
 pub struct Network {
@@ -262,9 +269,14 @@ impl Network {
 
   #[allow(clippy::cognitive_complexity)]
   pub async fn handle_network_event(&mut self, io_event: IoEvent) {
-    if !matches!(io_event, IoEvent::RefreshAuthentication)
-      && !self.ensure_authentication_fresh(false).await
-    {
+    // Cover-art fetches are source-agnostic (Subsonic/YouTube/local users may
+    // have no Spotify session at all), so they skip the Spotify auth gate like
+    // RefreshAuthentication does.
+    let bypass_auth = matches!(io_event, IoEvent::RefreshAuthentication);
+    #[cfg(feature = "cover-art")]
+    let bypass_auth = bypass_auth || matches!(io_event, IoEvent::FetchCoverArt(_));
+
+    if !bypass_auth && !self.ensure_authentication_fresh(false).await {
       return;
     }
 
@@ -505,6 +517,10 @@ impl Network {
       }
       IoEvent::GetLyrics(track, artist, duration) => {
         self.get_lyrics(track, artist, duration).await;
+      }
+      #[cfg(feature = "cover-art")]
+      IoEvent::FetchCoverArt(request) => {
+        self.fetch_cover_art(request).await;
       }
       IoEvent::GetUserTopTracks(time_range) => {
         self.get_user_top_tracks(time_range).await;

@@ -353,7 +353,20 @@ fn video_to_track_info(v: &YtVideo) -> TrackInfo {
     is_local: false,
     track_number: 0,
     explicit: false,
+    // Flat extraction often omits the top-level `thumbnail`; every video id has
+    // a deterministic thumbnail URL, so fall back to that.
+    image_url: v
+      .thumbnail
+      .clone()
+      .or_else(|| Some(thumbnail_url_for_video_id(&v.id))),
   }
+}
+
+/// Deterministic YouTube thumbnail URL for a video id. `hqdefault.jpg` exists
+/// for every video (unlike `maxresdefault`), so it serves as the cover-art
+/// fallback when yt-dlp's flat rows or a stored playlist carry no thumbnail.
+pub(crate) fn thumbnail_url_for_video_id(video_id: &str) -> String {
+  format!("https://i.ytimg.com/vi/{video_id}/hqdefault.jpg")
 }
 
 /// `"YouTube • 863M views"`-style one-liner for the album column.

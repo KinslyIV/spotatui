@@ -166,6 +166,52 @@ fn update_discord_presence(
   }
 }
 
+/// Identity of the currently-playing track, used by the shared track-change
+/// detector to fire lyrics + cover-art fetches exactly once per track (rather
+/// than every tick). Title + artists + album + duration distinguishes tracks
+/// across every source without depending on a source-specific id.
+type TrackIdentity = (String, Vec<String>, String, u32);
+
+fn track_identity(snapshot: &crate::infra::media_metadata::PlaybackSnapshot) -> TrackIdentity {
+  (
+    snapshot.metadata.title.clone(),
+    snapshot.metadata.artists.clone(),
+    snapshot.metadata.album.clone(),
+    snapshot.metadata.duration_ms,
+  )
+}
+
+/// Resolve what cover art to fetch for the track described by `snapshot`.
+///
+/// Local files carry embedded artwork read straight from the file (no URL), so
+/// they take a dedicated `LocalFile` request. Every other source that can supply
+/// art (Spotify album art, YouTube thumbnail, Subsonic getCoverArt) surfaces it
+/// as `snapshot.metadata.image_url`. `None` means the current track has no art
+/// to show (e.g. internet radio, or a Spotify item without images).
+#[cfg(feature = "cover-art")]
+fn cover_art_request_for(
+  app: &App,
+  snapshot: &crate::infra::media_metadata::PlaybackSnapshot,
+) -> Option<crate::tui::cover_art::CoverArtRequest> {
+  use crate::tui::cover_art::CoverArtRequest;
+
+  #[cfg(feature = "local-files")]
+  if let Some(local) = app.local_playback.as_ref() {
+    let uri = local.queue.get(local.index)?;
+    let path = crate::infra::local::file_uri_to_path(uri).ok()?;
+    return Some(CoverArtRequest::LocalFile {
+      key: uri.clone(),
+      path,
+    });
+  }
+
+  snapshot
+    .metadata
+    .image_url
+    .clone()
+    .map(CoverArtRequest::Url)
+}
+
 fn playback_window_title(app: &App) -> String {
   let Some(snapshot) = crate::infra::media_metadata::current_playback_snapshot(app) else {
     return DEFAULT_WINDOW_TITLE.to_string();
@@ -504,6 +550,13 @@ pub async fn start_ui(
   let mut mpris_state = MprisState::default();
 
   let mut window_title_state = WindowTitleState::default();
+  // Last track the shared detector fired lyrics for, so the lookup re-fires
+  // only on an actual track change rather than every tick.
+  let mut last_track_identity: Option<TrackIdentity> = None;
+  // Cache key (URL / file URI) of the cover art last requested, so the per-tick
+  // cover-art evaluation dispatches a fetch only when the resolved art changes.
+  #[cfg(feature = "cover-art")]
+  let mut last_cover_art_key: Option<String> = None;
   let mut is_first_render = true;
 
   // Throttled persistence of the active non-Spotify playback session, so it can
@@ -750,6 +803,94 @@ pub async fn start_ui(
         #[cfg(all(feature = "mpris", target_os = "linux"))]
         if let Some(ref mpris) = mpris_manager {
           update_mpris_state(mpris, &mut mpris_state, &app);
+        }
+
+        // Shared track-change detector. One place decides "the playing track
+        // changed" off the source-agnostic snapshot, then drives BOTH lyrics
+        // (every source) and cover art (cover-art feature) — so both light up
+        // for Spotify, local files, Subsonic, radio and YouTube through a single
+        // path.
+        {
+          let snapshot = crate::infra::media_metadata::current_playback_snapshot(&app);
+
+          // Lyrics fire once per track (identity latch): their inputs — title,
+          // artist, duration — ARE the identity, so they are correct at the
+          // instant the identity changes.
+          let identity = snapshot.as_ref().map(track_identity);
+          if identity != last_track_identity {
+            last_track_identity = identity;
+            match snapshot.as_ref() {
+              Some(snapshot) => {
+                use crate::infra::media_metadata::PlaybackItemKind;
+                // LRCLIB lookup by title + artist + duration. Source agnostic;
+                // radio (duration 0) simply resolves to "not found". Podcast
+                // episodes have no lyrics, so skip the lookup and show the
+                // not-found message rather than stale lyrics.
+                if snapshot.item_kind == PlaybackItemKind::Track {
+                  app.dispatch(IoEvent::GetLyrics(
+                    snapshot.metadata.title.clone(),
+                    snapshot.primary_artist(),
+                    snapshot.metadata.duration_ms as f64 / 1000.0,
+                  ));
+                } else {
+                  app.lyrics = None;
+                  app.lyrics_status = crate::core::app::LyricsStatus::NotFound;
+                }
+              }
+              None => {
+                // Nothing is playing: reset so no stale lyrics linger.
+                app.lyrics = None;
+                app.lyrics_status = crate::core::app::LyricsStatus::NotStarted;
+              }
+            }
+          }
+
+          // Cover art is re-evaluated EVERY tick against the desired image key,
+          // NOT latched to the identity change. With native streaming the
+          // snapshot's `image_url` comes from the polled Spotify context, which
+          // catches up seconds *after* `native_track_info` flips the identity —
+          // an identity-latched fetch would fire once with the previous track's
+          // URL (or none at startup) and never see the real one, leaving the art
+          // stuck or missing until restart. Comparing against
+          // `last_cover_art_key` keeps this a no-op on quiet ticks and fires
+          // exactly once whenever the resolved art actually changes.
+          #[cfg(feature = "cover-art")]
+          {
+            use crate::core::app::CoverArtStatus;
+            let enabled = app
+              .user_config
+              .do_draw_cover_art(app.cover_art.full_image_support());
+            let desired = if enabled {
+              snapshot
+                .as_ref()
+                .and_then(|snapshot| cover_art_request_for(&app, snapshot))
+            } else {
+              None
+            };
+            match desired {
+              Some(request) => {
+                if last_cover_art_key.as_deref() != Some(request.key()) {
+                  last_cover_art_key = Some(request.key().to_string());
+                  // Keep the previous image on screen until the new one
+                  // resolves (smooth swap); the fetch runs off-lock.
+                  app.cover_art_status = CoverArtStatus::Loading;
+                  app.dispatch(IoEvent::FetchCoverArt(request));
+                }
+              }
+              None => {
+                // No art to show (radio, art disabled, nothing playing): drop
+                // any stale image once, so the pane shows the placeholder.
+                if last_cover_art_key.take().is_some() || app.cover_art.available() {
+                  app.cover_art.clear();
+                }
+                app.cover_art_status = if enabled && snapshot.is_some() {
+                  CoverArtStatus::Unavailable
+                } else {
+                  CoverArtStatus::NotStarted
+                };
+              }
+            }
+          }
         }
 
         // Local-file playback reads its progress live from the player at render

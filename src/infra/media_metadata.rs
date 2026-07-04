@@ -164,6 +164,9 @@ fn source_playback_snapshot(app: &App) -> Option<PlaybackSnapshot> {
       local.album.clone(),
       local.duration_ms as u32,
       local.queue.get(local.index).cloned(),
+      // Local files carry embedded art (read via `extract_embedded_cover`), not
+      // a URL, so the snapshot's `image_url` stays `None`.
+      None,
       local.player.position().as_millis(),
       !local.player.is_paused(),
       app,
@@ -179,6 +182,7 @@ fn source_playback_snapshot(app: &App) -> Option<PlaybackSnapshot> {
       track.album.clone(),
       track.duration_ms as u32,
       track.uri.clone(),
+      track.image_url.clone(),
       subsonic.player.position().as_millis(),
       !subsonic.player.is_paused(),
       app,
@@ -194,6 +198,7 @@ fn source_playback_snapshot(app: &App) -> Option<PlaybackSnapshot> {
       track.album.clone(),
       track.duration_ms as u32,
       track.uri.clone(),
+      track.image_url.clone(),
       youtube.player.position().as_millis(),
       !youtube.player.is_paused(),
       app,
@@ -217,6 +222,8 @@ fn source_playback_snapshot(app: &App) -> Option<PlaybackSnapshot> {
       radio.station.album.clone(),
       0,
       radio.station.uri.clone(),
+      // Live radio streams carry no per-track cover art.
+      None,
       radio.player.position().as_millis(),
       !radio.player.is_paused(),
       app,
@@ -226,9 +233,12 @@ fn source_playback_snapshot(app: &App) -> Option<PlaybackSnapshot> {
   None
 }
 
-/// Assemble a [`PlaybackSnapshot`] from a decoded source's fields. Sources carry
-/// no album-art URL, are always treated as a single track, and take shuffle from
-/// the user config (no per-source shuffle state).
+/// Assemble a [`PlaybackSnapshot`] from a decoded source's fields. `image_url`
+/// is a directly-fetchable cover-art URL when the source provides one (Subsonic
+/// getCoverArt, YouTube thumbnail) and `None` otherwise (local files carry
+/// embedded art fetched separately; radio has none). Sources are always treated
+/// as a single track and take shuffle from the user config (no per-source
+/// shuffle state).
 #[cfg(any(
   feature = "local-files",
   feature = "subsonic",
@@ -242,6 +252,7 @@ fn source_snapshot(
   album: String,
   duration_ms: u32,
   item_uri: Option<String>,
+  image_url: Option<String>,
   progress_ms: u128,
   is_playing: bool,
   app: &App,
@@ -251,7 +262,7 @@ fn source_snapshot(
       title,
       artists,
       album,
-      image_url: None,
+      image_url,
       duration_ms,
     },
     item_kind: PlaybackItemKind::Track,

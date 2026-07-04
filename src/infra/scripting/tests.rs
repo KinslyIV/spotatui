@@ -22,6 +22,7 @@ fn track(uri: &str, name: &str) -> TrackInfo {
     is_local: false,
     track_number: 0,
     explicit: false,
+    image_url: None,
   }
 }
 

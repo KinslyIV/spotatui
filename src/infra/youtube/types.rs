@@ -23,4 +23,8 @@ pub struct YtVideo {
   pub duration: Option<f64>,
   #[serde(default)]
   pub view_count: Option<u64>,
+  /// Best thumbnail URL. yt-dlp emits a top-level `thumbnail` string; `None`
+  /// for sparse flat rows that omit it.
+  #[serde(default)]
+  pub thumbnail: Option<String>,
 }

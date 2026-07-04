@@ -62,6 +62,12 @@ pub struct TrackInfo {
   pub track_number: u32,
   #[serde(default)]
   pub explicit: bool,
+  /// A directly-fetchable cover-art image URL for this track, when the source
+  /// can provide one (Subsonic getCoverArt, YouTube thumbnail). `None` for
+  /// sources without per-track art. Additive: only adds a key to the serialized
+  /// snapshot, preserving the api_version = 4 plugin contract.
+  #[serde(default)]
+  pub image_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -317,6 +323,7 @@ pub fn playback_state(app: &App) -> Option<PlaybackState> {
     is_local: false,
     track_number: 0,
     explicit: false,
+    image_url: None,
   });
 
   let (is_playing, shuffle, repeat, device) = if let Some(s) = &snapshot {

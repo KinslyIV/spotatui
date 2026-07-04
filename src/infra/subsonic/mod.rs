@@ -273,6 +273,16 @@ impl SubsonicSource {
     )
   }
 
+  /// The authenticated `getCoverArt.view` URL for a cover-art id, suitable for a
+  /// direct image download. Mirrors `stream_url`'s auth (token+salt embedded).
+  pub fn cover_art_url(&self, cover_art_id: &str) -> String {
+    Self::append_param(
+      &self.endpoint_url("getCoverArt.view"),
+      "id",
+      &url_encode(cover_art_id),
+    )
+  }
+
   /// Download a track's audio to `dest`, streaming the response body to disk
   /// chunk-by-chunk; the file is then played from disk by the shared player.
   ///
@@ -363,35 +373,41 @@ impl From<&types::PlaylistDetail> for PlaylistInfo {
   }
 }
 
-fn song_to_track_info(s: &types::SubsonicSong) -> TrackInfo {
-  let artist_name = s.artist.clone().unwrap_or_default();
-  let artist_ref = if !artist_name.is_empty() {
-    vec![ArtistRef {
-      id: s.artist_id.clone(),
-      name: artist_name.clone(),
-    }]
-  } else {
-    vec![]
-  };
-
-  TrackInfo {
-    uri: Some(format!("{}{}", TRACK_PREFIX, s.id)),
-    name: s.title.clone(),
-    artists: if artist_name.is_empty() {
-      vec![]
+impl SubsonicSource {
+  /// Map a Subsonic song onto the shared [`TrackInfo`]. A method (not a free
+  /// function) so it can mint an authenticated `getCoverArt.view` URL from the
+  /// song's `coverArt` id via `self`.
+  fn song_to_track_info(&self, s: &types::SubsonicSong) -> TrackInfo {
+    let artist_name = s.artist.clone().unwrap_or_default();
+    let artist_ref = if !artist_name.is_empty() {
+      vec![ArtistRef {
+        id: s.artist_id.clone(),
+        name: artist_name.clone(),
+      }]
     } else {
-      vec![artist_name]
-    },
-    album: s.album.clone().unwrap_or_default(),
-    // Subsonic reports duration in seconds; convert to ms for our domain type.
-    duration_ms: s.duration.unwrap_or(0) * 1000,
-    id: Some(s.id.clone()),
-    album_id: s.album_id.clone(),
-    artist_refs: artist_ref,
-    is_playable: true,
-    is_local: false,
-    track_number: s.track_number.unwrap_or(0),
-    explicit: false,
+      vec![]
+    };
+
+    TrackInfo {
+      uri: Some(format!("{}{}", TRACK_PREFIX, s.id)),
+      name: s.title.clone(),
+      artists: if artist_name.is_empty() {
+        vec![]
+      } else {
+        vec![artist_name]
+      },
+      album: s.album.clone().unwrap_or_default(),
+      // Subsonic reports duration in seconds; convert to ms for our domain type.
+      duration_ms: s.duration.unwrap_or(0) * 1000,
+      id: Some(s.id.clone()),
+      album_id: s.album_id.clone(),
+      artist_refs: artist_ref,
+      is_playable: true,
+      is_local: false,
+      track_number: s.track_number.unwrap_or(0),
+      explicit: false,
+      image_url: s.cover_art.as_deref().map(|id| self.cover_art_url(id)),
+    }
   }
 }
 
@@ -461,7 +477,13 @@ impl MediaSource for SubsonicSource {
       .playlist
       .ok_or_else(|| anyhow!("No playlist in getPlaylist response"))?;
 
-    Ok(detail.entry.iter().map(song_to_track_info).collect())
+    Ok(
+      detail
+        .entry
+        .iter()
+        .map(|s| self.song_to_track_info(s))
+        .collect(),
+    )
   }
 }
 
@@ -476,7 +498,7 @@ impl Searcher for SubsonicSource {
 
     let sr = resp.search_result3.unwrap_or_default();
     Ok(SearchResults {
-      tracks: sr.song.iter().map(song_to_track_info).collect(),
+      tracks: sr.song.iter().map(|s| self.song_to_track_info(s)).collect(),
       albums: sr.album.iter().map(album_to_album_info).collect(),
       artists: sr.artist.iter().map(artist_to_artist_info).collect(),
       playlists: vec![],
@@ -792,7 +814,8 @@ mod tests {
     let detail = env.response.playlist.unwrap();
     assert_eq!(detail.entry.len(), 2);
 
-    let track = song_to_track_info(&detail.entry[0]);
+    let src = SubsonicSource::new("http://localhost", "user", "sesame");
+    let track = src.song_to_track_info(&detail.entry[0]);
     assert_eq!(track.uri.as_deref(), Some("subsonic:track:101"));
     assert_eq!(track.name, "Weightless");
     assert_eq!(track.artists, vec!["Marconi Union"]);
@@ -817,7 +840,8 @@ mod tests {
 
     // Tracks
     assert_eq!(sr.song.len(), 1);
-    let track = song_to_track_info(&sr.song[0]);
+    let src = SubsonicSource::new("http://localhost", "user", "sesame");
+    let track = src.song_to_track_info(&sr.song[0]);
     assert_eq!(track.uri.as_deref(), Some("subsonic:track:201"));
     assert_eq!(track.name, "Yesterday");
     assert_eq!(track.duration_ms, 125_000);
