@@ -1161,6 +1161,51 @@ mod tests {
   }
 
   #[test]
+  fn reconcile_restores_selection_against_folders_first_order() {
+    use crate::core::app::{App, PlaylistFolder, PlaylistFolderItem};
+    use crate::core::test_helpers::playlist_info;
+
+    // Root order: P0, folderA, P1, folderB. Restore selection to P1.
+    let mut app = App::default();
+    app.all_playlists = vec![
+      playlist_info("00000000000000000000p0", "P0", "me", false),
+      playlist_info("00000000000000000000p1", "P1", "me", false),
+    ];
+    app.playlist_folder_items = vec![
+      PlaylistFolderItem::Playlist {
+        index: 0,
+        current_id: 0,
+      },
+      PlaylistFolderItem::Folder(PlaylistFolder {
+        name: "A".to_string(),
+        current_id: 0,
+        target_id: 1,
+      }),
+      PlaylistFolderItem::Playlist {
+        index: 1,
+        current_id: 0,
+      },
+      PlaylistFolderItem::Folder(PlaylistFolder {
+        name: "B".to_string(),
+        current_id: 0,
+        target_id: 2,
+      }),
+    ];
+    app.user_config.behavior.group_folders_first = true;
+
+    reconcile_playlist_selection(&mut app, Some("00000000000000000000p1"), 0, None);
+
+    // Sorted view is [A, B, P0, P1]; P1 lives at display index 3, and the
+    // restored index must resolve back to P1 (not P0 at the unsorted index 2).
+    let idx = app.selected_playlist_index.expect("selection restored");
+    assert_eq!(idx, 3);
+    assert!(matches!(
+      app.get_playlist_display_item_at(idx),
+      Some(PlaylistFolderItem::Playlist { index: 1, .. })
+    ));
+  }
+
+  #[test]
   fn next_saved_tracks_offset_uses_page_limit() {
     let page = saved_tracks_page(20, 20, true);
     assert_eq!(next_saved_tracks_offset(&page), Some(40));
@@ -1297,9 +1342,8 @@ fn reconcile_playlist_selection(
 
   if let Some(playlist_id) = preferred_playlist_id {
     let visible_playlist_index = app
-      .playlist_folder_items
-      .iter()
-      .filter(|item| app.is_playlist_item_visible_in_current_folder(item))
+      .get_playlist_display_items()
+      .into_iter()
       .enumerate()
       .find_map(|(display_idx, item)| match item {
         PlaylistFolderItem::Playlist { index, .. } => app
@@ -1330,9 +1374,8 @@ fn reconcile_playlist_selection(
     if let Some(folder_id) = target_folder {
       app.current_playlist_folder_id = folder_id;
       let display_idx = app
-        .playlist_folder_items
-        .iter()
-        .filter(|item| app.is_playlist_item_visible_in_current_folder(item))
+        .get_playlist_display_items()
+        .into_iter()
         .enumerate()
         .find_map(|(idx, item)| match item {
           PlaylistFolderItem::Playlist { index, .. } => app
