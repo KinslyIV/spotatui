@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Album tracklists no longer cut off at 50 songs**: Opening an album now pages through the full Spotify tracklist instead of stopping at the API's 50-track page limit, whether the album is opened from search results, an artist's discography, a track's context, or the saved-albums library ([#324](https://github.com/LargeModGames/spotatui/issues/324)).
+
 ### Added
 
 - **Native cross-source play queue**: Press `z` on any track to add it to a native queue that plays across sources (Spotify, Local Files, Subsonic, and YouTube in one FIFO; internet radio is excluded since a live stream is not a finite track). Queued tracks play before the underlying playlist/album context, then that context resumes where it left off. Open the queue with `Shift+Q`: remove the selected item with `x` (rebindable via `remove_from_queue`, default `x`), reorder it with `J`/`K`, or press `Enter` to skip ahead and play it now. The Queue screen also previews what resumes from the underlying context once the queue drains. The queue survives restarts (persisted in `last_session.yml`). Spotify tracks queue through native (librespot) streaming; when you are controlling an external Spotify Connect device instead, `z` keeps the previous Web-API "add to Spotify's queue" behavior ([#206](https://github.com/LargeModGames/spotatui/issues/206)).

@@ -1,6 +1,7 @@
 use super::common_key_events;
 use crate::{
   core::app::{ActiveBlock, AlbumTableContext, App, RouteId, SelectedFullAlbum},
+  infra::network::IoEvent,
   tui::event::Key,
 };
 
@@ -44,8 +45,21 @@ pub fn handler(key: Key, app: &mut App) {
     Key::Enter => {
       if let Some(albums) = app.library.saved_albums.get_results(None) {
         if let Some(selected_album) = albums.items.get(app.album_list_index) {
+          let album = selected_album.album.clone();
+          // The library cache embeds only the first page of each album's
+          // tracklist (50 tracks max); refetch longer albums in full.
+          let cached_is_complete = album
+            .total_tracks
+            .is_none_or(|total| album.tracks.len() as u32 >= total);
+          if !cached_is_complete {
+            if let Some(id) = album.id.clone() {
+              // GetAlbum sets the Full context and pushes AlbumTracks itself.
+              app.dispatch(IoEvent::GetAlbum(id));
+              return;
+            }
+          }
           app.selected_album_full = Some(SelectedFullAlbum {
-            album: selected_album.album.clone(),
+            album,
             selected_index: 0,
           });
           app.album_table_context = AlbumTableContext::Full;
@@ -67,6 +81,92 @@ pub fn handler(key: Key, app: &mut App) {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::core::pagination::Paged;
+  use crate::core::plugin_api::{AlbumInfo, SavedAlbumInfo, TrackInfo};
+  use crate::core::user_config::UserConfig;
+  use std::sync::mpsc::channel;
+  use std::time::SystemTime;
+
+  fn track(name: &str) -> TrackInfo {
+    TrackInfo {
+      uri: None,
+      name: name.to_string(),
+      artists: vec!["Artist".to_string()],
+      album: "Album".to_string(),
+      duration_ms: 1000,
+      id: None,
+      album_id: None,
+      artist_refs: vec![],
+      is_playable: true,
+      is_local: false,
+      track_number: 0,
+      explicit: false,
+      image_url: None,
+    }
+  }
+
+  fn app_with_saved_album(
+    cached_tracks: usize,
+    total_tracks: u32,
+  ) -> (App, std::sync::mpsc::Receiver<IoEvent>) {
+    let (tx, rx) = channel();
+    let mut app = App::new(tx, UserConfig::new(), Some(SystemTime::now()));
+    let album = AlbumInfo {
+      id: Some("longalbum".to_string()),
+      uri: Some("spotify:album:longalbum".to_string()),
+      name: "One Wayne G".to_string(),
+      total_tracks: Some(total_tracks),
+      tracks: (0..cached_tracks)
+        .map(|i| track(&format!("t{}", i)))
+        .collect(),
+      ..AlbumInfo::default()
+    };
+    app.library.saved_albums.add_pages(Paged {
+      items: vec![SavedAlbumInfo {
+        album,
+        added_at: String::new(),
+      }],
+      offset: 0,
+      limit: 1,
+      total: 1,
+      next: None,
+      previous: None,
+    });
+    (app, rx)
+  }
+
+  #[test]
+  fn enter_on_saved_album_with_complete_tracklist_uses_cache() {
+    let (mut app, rx) = app_with_saved_album(2, 2);
+
+    handler(Key::Enter, &mut app);
+
+    assert!(app.selected_album_full.is_some());
+    assert_eq!(
+      app.get_current_route().active_block,
+      ActiveBlock::AlbumTracks
+    );
+    assert!(rx.try_recv().is_err());
+  }
+
+  #[test]
+  fn enter_on_saved_album_with_truncated_tracklist_refetches_full_album() {
+    let (mut app, rx) = app_with_saved_album(50, 199);
+
+    handler(Key::Enter, &mut app);
+
+    // The cached 50-track page must not be rendered; GetAlbum fetches the
+    // complete tracklist and pushes the AlbumTracks route itself.
+    assert!(app.selected_album_full.is_none());
+    assert_ne!(
+      app.get_current_route().active_block,
+      ActiveBlock::AlbumTracks
+    );
+    match rx.recv().unwrap() {
+      IoEvent::GetAlbum(id) => assert_eq!(id, "longalbum"),
+      _ => panic!("expected GetAlbum"),
+    }
+  }
 
   #[test]
   fn on_left_press() {

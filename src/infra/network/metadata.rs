@@ -13,7 +13,7 @@ use rspotify::model::{
   enums::Country,
   idtypes::{AlbumId, ArtistId, ShowId, TrackId},
   page::{CursorBasedPage, Page},
-  track::FullTrack,
+  track::{FullTrack, SimplifiedTrack},
 };
 use rspotify::prelude::*;
 use serde::Deserialize;
@@ -36,6 +36,34 @@ struct FollowedArtistsResponse {
 fn country_code(country: Country) -> String {
   let code: &'static str = country.into();
   code.to_string()
+}
+
+/// Fetch an album's tracklist from `offset` onward, following pagination until
+/// the API reports no further page. Spotify caps each response at 50 tracks,
+/// so albums longer than that need this loop to come back complete.
+async fn fetch_album_tracks_from(
+  network: &Network,
+  album_id: &str,
+  mut offset: u32,
+) -> anyhow::Result<Vec<SimplifiedTrack>> {
+  let path = format!("albums/{}/tracks", album_id);
+  let limit = 50u32;
+  let mut items = Vec::new();
+  loop {
+    let page = network
+      .spotify_get_typed::<Page<SimplifiedTrack>>(
+        &path,
+        &[("limit", limit.to_string()), ("offset", offset.to_string())],
+      )
+      .await?;
+    let has_next = page.next.is_some();
+    items.extend(page.items);
+    if !has_next {
+      break;
+    }
+    offset += limit;
+  }
+  Ok(items)
 }
 
 pub trait MetadataNetwork {
@@ -155,17 +183,19 @@ impl MetadataNetwork for Network {
   async fn get_album_tracks(&mut self, album: Box<SimplifiedAlbum>) {
     let album_id = album.id.clone();
     if let Some(id) = album_id {
-      let path = format!("albums/{}/tracks", id.id());
-      // TODO: Handle pagination for albums with > 50 tracks
-      match self
-        .spotify_get_typed::<Page<rspotify::model::track::SimplifiedTrack>>(
-          &path,
-          &[("limit", "50".to_string()), ("offset", "0".to_string())],
-        )
-        .await
-      {
-        Ok(tracks) => {
+      match fetch_album_tracks_from(self, id.id(), 0).await {
+        Ok(track_items) => {
           let album_info = crate::core::plugin_api::AlbumInfo::from(album.as_ref());
+          let total = track_items.len() as u32;
+          let tracks = Page {
+            items: track_items,
+            href: String::new(),
+            limit: total,
+            next: None,
+            offset: 0,
+            previous: None,
+            total,
+          };
           let tracks_domain = map_page(&tracks, |t| crate::core::plugin_api::TrackInfo::from(t));
           let mut app = self.app.lock().await;
           app.selected_album_simplified = Some(crate::core::app::SelectedAlbum {
@@ -186,7 +216,19 @@ impl MetadataNetwork for Network {
       .spotify_get_typed::<FullAlbum>(&format!("albums/{}", album_id.id()), &[])
       .await
     {
-      Ok(album) => {
+      Ok(mut album) => {
+        // A full album embeds only the first page of its tracklist (50 tracks
+        // max); fetch the rest so longer albums render completely.
+        if album.tracks.next.is_some() {
+          let offset = album.tracks.items.len() as u32;
+          match fetch_album_tracks_from(self, album_id.id(), offset).await {
+            Ok(rest) => album.tracks.items.extend(rest),
+            Err(e) => {
+              self.handle_error(anyhow!(e)).await;
+              return;
+            }
+          }
+        }
         let album_info = crate::core::plugin_api::AlbumInfo::from(&album);
         let mut app = self.app.lock().await;
         app.selected_album_full = Some(crate::core::app::SelectedFullAlbum {
