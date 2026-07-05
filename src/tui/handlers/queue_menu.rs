@@ -20,9 +20,10 @@ pub fn handler(key: Key, app: &mut App) {
 }
 
 /// Jump to the selected queue row: drop every item before it, then start the
-/// native queue there. If a decoded context is playing and the queue does not
-/// already own playback, suspend it mid-track first (so it resumes at the same
-/// track + position when the queue drains). Row 0 (now playing) is non-actionable.
+/// native queue there. If a context is playing and the queue does not already
+/// own playback, suspend it mid-track first (a decoded source resumes at the
+/// same track + position; a native-Spotify context resumes at the same track).
+/// Row 0 (now playing) is non-actionable.
 fn play_selected(app: &mut App) {
   let selected = app.queue_selected_index;
   if selected == 0 {
@@ -37,6 +38,12 @@ fn play_selected(app: &mut App) {
   app.queue_selected_index = 1;
   if !app.queue_owns_playback() {
     app.suspend_active_decoded_context_mid_track();
+    // No decoded context recorded a suspension: a native-Spotify context may be
+    // playing instead — suspend it so the queue hands back to it on drain.
+    #[cfg(feature = "streaming")]
+    if app.queue_suspended.is_none() {
+      app.suspend_native_spotify_context_mid_track();
+    }
   }
   app.dispatch(crate::infra::network::IoEvent::AdvanceNativeQueue);
 }

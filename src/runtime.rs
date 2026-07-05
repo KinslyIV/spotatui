@@ -1767,9 +1767,8 @@ async fn handle_mpris_events(
       MprisEvent::Next => {
         #[cfg(feature = "streaming")]
         if let Some(ref player) = streaming_player {
-          player.activate();
-          player.next();
-          player.play();
+          let _ = player;
+          app.lock().await.next_track();
           continue;
         }
         let mut app_lock = app.lock().await;
@@ -1778,9 +1777,8 @@ async fn handle_mpris_events(
       MprisEvent::Previous => {
         #[cfg(feature = "streaming")]
         if let Some(ref player) = streaming_player {
-          player.activate();
-          player.prev();
-          player.play();
+          let _ = player;
+          app.lock().await.previous_track();
           continue;
         }
         let mut app_lock = app.lock().await;
@@ -2038,16 +2036,12 @@ async fn handle_macos_media_events(
         player.pause();
       }
       MacMediaEvent::Next => {
-        player.activate();
-        player.next();
-        // Keep Connect + audio state in sync.
-        player.play();
+        let _ = player;
+        app.lock().await.next_track();
       }
       MacMediaEvent::Previous => {
-        player.activate();
-        player.prev();
-        // Keep Connect + audio state in sync.
-        player.play();
+        let _ = player;
+        app.lock().await.previous_track();
       }
       MacMediaEvent::Stop => {
         player.stop();
@@ -2169,18 +2163,16 @@ async fn handle_windows_media_events(
       }
       WindowsMediaEvent::Next => {
         if let Some(player) = &player_opt {
-          player.activate();
-          player.next();
-          player.play();
+          let _ = player;
+          app.lock().await.next_track();
         } else {
           app.lock().await.dispatch(IoEvent::NextTrack);
         }
       }
       WindowsMediaEvent::Previous => {
         if let Some(player) = &player_opt {
-          player.activate();
-          player.prev();
-          player.play();
+          let _ = player;
+          app.lock().await.previous_track();
         } else {
           app.lock().await.dispatch(IoEvent::PreviousTrack);
         }

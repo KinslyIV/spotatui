@@ -51,9 +51,17 @@ pub async fn route_queue_event(app: &Arc<Mutex<App>>, event: &IoEvent) -> bool {
     return handled;
   }
 
+  #[cfg(feature = "streaming")]
+  if let Some(handled) = route_spotify_queue_transport(app, event).await {
+    return handled;
+  }
+
   // An explicit new-playback start relinquishes the queue slot (keeping the
   // queued items) so the per-source teardowns/starts run against a clean state.
-  if matches!(event, IoEvent::StartPlayback(..)) {
+  if matches!(
+    event,
+    IoEvent::StartPlayback(Some(_), _, _) | IoEvent::StartPlayback(_, Some(_), _)
+  ) {
     clear_queue_playback(app).await;
   }
   false
@@ -96,6 +104,28 @@ async fn route_queue_transport(app: &Arc<Mutex<App>>, event: &IoEvent) -> Option
     // A forward-only queue has no "previous"; restart the current queued track.
     IoEvent::PreviousTrack | IoEvent::ForcePreviousTrack => {
       let _ = player.seek(Duration::from_millis(0));
+      Some(true)
+    }
+    _ => None,
+  }
+}
+
+/// Transport controls for a queued Spotify track playing through librespot.
+#[cfg(feature = "streaming")]
+async fn route_spotify_queue_transport(app: &Arc<Mutex<App>>, event: &IoEvent) -> Option<bool> {
+  let is_spotify_slot = { app.lock().await.queue_now_is_spotify() };
+  if !is_spotify_slot {
+    return None;
+  }
+  match event {
+    IoEvent::NextTrack => {
+      advance_native_queue(app).await;
+      Some(true)
+    }
+    IoEvent::PreviousTrack | IoEvent::ForcePreviousTrack => {
+      if let Some(player) = { app.lock().await.streaming_player.clone() } {
+        player.seek(0);
+      }
       Some(true)
     }
     _ => None,
@@ -446,7 +476,7 @@ async fn resume_or_finish(app: &Arc<Mutex<App>>) {
   match suspended {
     None => {
       // Nothing was suspended: the queue was playing over an idle app (or a
-      // Spotify context Phase 2 doesn't resume). Stop the slot and note it.
+      // context finished before the queue started). Stop the slot and note it.
       #[cfg(feature = "audio-decode")]
       if let Some(player) = queue_player {
         player.stop();
@@ -604,7 +634,8 @@ async fn resume_subsonic(
       let decode_player = Arc::clone(&player);
       let ok = tokio::task::spawn_blocking(move || decode_player.play_file(&path))
         .await
-        .is_ok();
+        .map(|r| r.is_ok())
+        .unwrap_or(false);
       // Clear the latch either way: on failure the sink is empty, so leaving
       // `advancing = true` would wedge the runner tick's advance off forever.
       if let Some(s) = app.lock().await.subsonic_playback.as_mut() {
@@ -655,7 +686,8 @@ async fn resume_youtube(
       let decode_player = Arc::clone(&player);
       let ok = tokio::task::spawn_blocking(move || decode_player.play_file(&path))
         .await
-        .is_ok();
+        .map(|r| r.is_ok())
+        .unwrap_or(false);
       // Clear the latch either way: on failure the sink is empty, so leaving
       // `advancing = true` would wedge the runner tick's advance off forever.
       if let Some(s) = app.lock().await.youtube_playback.as_mut() {
@@ -742,6 +774,72 @@ mod tests {
     let app = test_app();
     assert!(route_queue_event(&app, &IoEvent::AdvanceNativeQueue).await);
     assert!(app.lock().await.native_queue.is_empty());
+  }
+
+  #[cfg(feature = "streaming")]
+  #[tokio::test]
+  async fn next_track_is_consumed_by_spotify_queue_slot() {
+    use crate::infra::queue::QueueNowPlaying;
+    let app = test_app();
+    app.lock().await.queue_now = Some(QueueNowPlaying::Spotify {
+      track: track("spotify:track:queued", "Queued"),
+    });
+
+    assert!(route_queue_event(&app, &IoEvent::NextTrack).await);
+  }
+
+  #[cfg(feature = "streaming")]
+  #[tokio::test]
+  async fn bare_resume_does_not_clear_spotify_queue_slot() {
+    use crate::core::queue::SuspendedContext;
+    use crate::infra::queue::QueueNowPlaying;
+    let app = test_app();
+    {
+      let mut guard = app.lock().await;
+      guard.queue_now = Some(QueueNowPlaying::Spotify {
+        track: track("spotify:track:queued", "Queued"),
+      });
+      guard.queue_suspended = Some(SuspendedContext::Spotify {
+        context_uri: Some("spotify:playlist:ctx".to_string()),
+        resume_track_uri: Some("spotify:track:resume".to_string()),
+      });
+    }
+
+    assert!(!route_queue_event(&app, &IoEvent::StartPlayback(None, None, None)).await);
+
+    let guard = app.lock().await;
+    assert!(guard.queue_now_is_spotify());
+    assert!(guard.queue_suspended.is_some());
+  }
+
+  #[cfg(feature = "streaming")]
+  #[tokio::test]
+  async fn new_playback_clears_spotify_queue_slot() {
+    use crate::core::queue::SuspendedContext;
+    use crate::infra::queue::QueueNowPlaying;
+    let app = test_app();
+    {
+      let mut guard = app.lock().await;
+      guard.queue_now = Some(QueueNowPlaying::Spotify {
+        track: track("spotify:track:queued", "Queued"),
+      });
+      guard.queue_suspended = Some(SuspendedContext::Spotify {
+        context_uri: Some("spotify:playlist:ctx".to_string()),
+        resume_track_uri: Some("spotify:track:resume".to_string()),
+      });
+    }
+
+    assert!(
+      !route_queue_event(
+        &app,
+        &IoEvent::StartPlayback(Some("spotify:playlist:new".to_string()), None, None)
+      )
+      .await
+    );
+
+    let guard = app.lock().await;
+    assert!(!guard.queue_owns_playback());
+    assert!(guard.queue_suspended.is_none());
   }
 
   /// A live end-to-end queue test: browse a Subsonic playlist, start it, queue a

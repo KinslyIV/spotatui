@@ -3,9 +3,7 @@
 //! The queue itself is a `Vec<TrackInfo>` on [`App`](crate::core::app::App); this
 //! module holds the small value types that classify a queue item by its source
 //! (URI scheme) and record how to resume the underlying per-source context once
-//! the queue drains. Phase 1 only populates and displays the queue — the
-//! playback engine that consumes these types lands in Phase 2, so several items
-//! here are intentionally unused until then.
+//! the queue drains.
 
 /// Which source a queue item plays through, derived from its URI scheme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,7 +43,7 @@ pub fn source_label(source: QueueItemSource) -> &'static str {
 
 /// Whether this build can actually play a queue item from the given source.
 /// A slim build (no source features) can only play Spotify tracks via native
-/// streaming; each alternative source is gated on its own Cargo feature. Phase 2
+/// streaming; each alternative source is gated on its own Cargo feature. The queue
 /// consults this to skip unplayable items with a status message instead of
 /// stalling the queue.
 pub fn source_available(source: QueueItemSource) -> bool {
@@ -58,7 +56,7 @@ pub fn source_available(source: QueueItemSource) -> bool {
 }
 
 /// How to resume the underlying per-source context after the native queue
-/// drains. Recorded when a track is queued over an active context (Phase 2).
+/// drains. Recorded when a track is queued over an active context.
 ///
 /// `resume_index: None` means the context was exhausted, so it should be torn
 /// down rather than resumed. In a slim build (no source features) this enum has

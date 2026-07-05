@@ -835,7 +835,7 @@ pub struct App {
   pub queue_selected_index: usize,
   /// The native cross-source playback queue (FIFO). Unlike [`Self::queue`]
   /// (a read-only mirror of Spotify's Web-API queue), this is owned by the app
-  /// and holds tracks from any source. Phase 2 consumes it for playback.
+  /// and holds tracks from any source.
   pub native_queue: Vec<TrackInfo>,
   /// How to resume the underlying per-source context after the native queue
   /// drains. Populated when a track is queued over an active context.
@@ -2803,15 +2803,35 @@ impl App {
   }
 
   /// Whether the native queue's playback slot currently owns the output (either a
-  /// decoded queued track or, in Phase 3, a native-streamed Spotify one). The
-  /// single gated entry point for every queue-ownership check; reduces to `false`
-  /// in a slim build where the slot cannot exist.
+  /// decoded queued track or a native-streamed Spotify one). The single gated
+  /// entry point for every queue-ownership check; reduces to `false` in a slim
+  /// build where the slot cannot exist.
   pub fn queue_owns_playback(&self) -> bool {
     #[cfg(any(feature = "streaming", feature = "audio-decode"))]
     {
       self.queue_now.is_some()
     }
     #[cfg(not(any(feature = "streaming", feature = "audio-decode")))]
+    {
+      false
+    }
+  }
+
+  /// Whether the queue slot is playing a Spotify track via native streaming.
+  /// While true, librespot owns the sink and any still-`Some` decoded
+  /// `*_playback` struct is a *suspended* context that must stay invisible to
+  /// the decoded-ownership predicates (`active_decoded_source`,
+  /// `active_decoded_player`, transport routing) — otherwise a space-bar toggle
+  /// or media key would resume the suspended player on top of librespot.
+  pub(crate) fn queue_now_is_spotify(&self) -> bool {
+    #[cfg(feature = "streaming")]
+    {
+      matches!(
+        self.queue_now.as_ref(),
+        Some(QueueNowPlaying::Spotify { .. })
+      )
+    }
+    #[cfg(not(feature = "streaming"))]
     {
       false
     }
@@ -2983,6 +3003,52 @@ impl App {
     });
   }
 
+  /// Suspend the native-Spotify context with **mid-track** semantics (the
+  /// Enter-jump path): resume at the track that was playing when the user
+  /// jumped, not the context's next one. Position is not preserved — the
+  /// Spotify resume path restarts the track. Pauses the streaming player so the
+  /// queued track doesn't play over it. A no-op unless native streaming is the
+  /// active playback device.
+  #[cfg(feature = "streaming")]
+  pub(crate) fn suspend_native_spotify_context_mid_track(&mut self) {
+    if !self.is_native_streaming_active_for_playback() {
+      return;
+    }
+    let context_uri = self
+      .current_playback_context
+      .as_ref()
+      .and_then(|ctx| ctx.context.as_ref())
+      .map(|c| c.uri.clone());
+    // Resume target: the *current* item. Fall back to the mirror queue's head
+    // (the context's next track) when the current item is unknown.
+    let resume_track_uri = self
+      .current_playback_context
+      .as_ref()
+      .and_then(|ctx| ctx.item.as_ref())
+      .and_then(|item| match item {
+        PlayableItem::Track(t) => t.id.as_ref().map(|id| id.uri()),
+        PlayableItem::Episode(e) => Some(e.id.uri()),
+        _ => None,
+      })
+      .or_else(|| {
+        self
+          .queue
+          .as_ref()
+          .and_then(|q| q.queue.first())
+          .and_then(|item| match item {
+            crate::core::plugin_api::PlayableInfo::Track(t) => t.uri.clone(),
+            crate::core::plugin_api::PlayableInfo::Episode(e) => e.uri.clone(),
+          })
+      });
+    self.queue_suspended = Some(crate::core::queue::SuspendedContext::Spotify {
+      context_uri,
+      resume_track_uri,
+    });
+    if let Some(player) = self.streaming_player.as_ref() {
+      player.pause();
+    }
+  }
+
   /// Handle a native-streaming `EndOfTrack` while the native queue is in play.
   ///
   /// Returns `true` when the queue took over (an `AdvanceNativeQueue` was
@@ -3073,6 +3139,11 @@ impl App {
     if self.queue_now_decoded_player().is_some() {
       return true;
     }
+    // A queued Spotify track owns the sink via librespot; any remaining
+    // `*_playback` below is a suspended context, not the active source.
+    if self.queue_now_is_spotify() {
+      return false;
+    }
     #[cfg(feature = "local-files")]
     if self.local_playback.is_some() {
       return true;
@@ -3118,6 +3189,11 @@ impl App {
     if let Some(p) = self.queue_now_decoded_player() {
       return Some(p);
     }
+    // A queued Spotify track owns the sink via librespot; any remaining
+    // `*_playback` below is a suspended context, not the active source.
+    if self.queue_now_is_spotify() {
+      return None;
+    }
     #[cfg(feature = "local-files")]
     if let Some(s) = &self.local_playback {
       return Some(&s.player);
@@ -3149,6 +3225,11 @@ impl App {
     if let Some(p) = self.queue_now_decoded_player() {
       return Some(p.position().as_millis());
     }
+    // A queued Spotify track owns the sink; librespot events drive progress and
+    // any remaining `*_playback` below is a suspended context.
+    if self.queue_now_is_spotify() {
+      return None;
+    }
     #[cfg(feature = "local-files")]
     if let Some(local) = &self.local_playback {
       return Some(local.player.position().as_millis());
@@ -3177,52 +3258,58 @@ impl App {
       return;
     }
 
-    // Local-file playback owns the session: toggle the local sink directly. The
-    // playbar reads pause state live from the player, so nothing else to update.
-    #[cfg(feature = "local-files")]
-    if let Some(local) = &self.local_playback {
-      if local.player.is_paused() {
-        local.player.resume();
-      } else {
-        local.player.pause();
+    // A queued Spotify track owns the sink via librespot: skip the per-source
+    // arms (any still-`Some` `*_playback` is a suspended context whose paused
+    // player must not be resumed on top of librespot) and fall through to the
+    // native-streaming control below.
+    if !self.queue_now_is_spotify() {
+      // Local-file playback owns the session: toggle the local sink directly. The
+      // playbar reads pause state live from the player, so nothing else to update.
+      #[cfg(feature = "local-files")]
+      if let Some(local) = &self.local_playback {
+        if local.player.is_paused() {
+          local.player.resume();
+        } else {
+          local.player.pause();
+        }
+        return;
       }
-      return;
-    }
 
-    // Subsonic playback owns the session the same way: toggle its sink directly.
-    #[cfg(feature = "subsonic")]
-    if let Some(subsonic) = &self.subsonic_playback {
-      if subsonic.player.is_paused() {
-        subsonic.player.resume();
-      } else {
-        subsonic.player.pause();
+      // Subsonic playback owns the session the same way: toggle its sink directly.
+      #[cfg(feature = "subsonic")]
+      if let Some(subsonic) = &self.subsonic_playback {
+        if subsonic.player.is_paused() {
+          subsonic.player.resume();
+        } else {
+          subsonic.player.pause();
+        }
+        return;
       }
-      return;
-    }
 
-    // YouTube playback owns the session the same way: toggle its sink directly.
-    #[cfg(feature = "youtube")]
-    if let Some(youtube) = &self.youtube_playback {
-      if youtube.player.is_paused() {
-        youtube.player.resume();
-      } else {
-        youtube.player.pause();
+      // YouTube playback owns the session the same way: toggle its sink directly.
+      #[cfg(feature = "youtube")]
+      if let Some(youtube) = &self.youtube_playback {
+        if youtube.player.is_paused() {
+          youtube.player.resume();
+        } else {
+          youtube.player.pause();
+        }
+        return;
       }
-      return;
-    }
 
-    // Internet-radio playback owns the session the same way: toggle its sink
-    // directly. Without this branch radio falls through to the streaming path,
-    // which only ever emits a bare resume — so Play/Pause could resume radio but
-    // never pause it.
-    #[cfg(feature = "internet-radio")]
-    if let Some(radio) = &self.radio_playback {
-      if radio.player.is_paused() {
-        radio.player.resume();
-      } else {
-        radio.player.pause();
+      // Internet-radio playback owns the session the same way: toggle its sink
+      // directly. Without this branch radio falls through to the streaming path,
+      // which only ever emits a bare resume — so Play/Pause could resume radio but
+      // never pause it.
+      #[cfg(feature = "internet-radio")]
+      if let Some(radio) = &self.radio_playback {
+        if radio.player.is_paused() {
+          radio.player.resume();
+        } else {
+          radio.player.pause();
+        }
+        return;
       }
-      return;
     }
 
     // Use native streaming player for instant control (bypasses event channel latency)
@@ -3290,6 +3377,14 @@ impl App {
 
   pub fn previous_track(&mut self) {
     info!("playing previous track or restarting current track");
+    // The native queue owns playback: a forward-only queue has no "previous",
+    // so restart the current queued track. The queue router intercepts the
+    // dispatched event for both decoded and Spotify queue slots.
+    if self.queue_owns_playback() {
+      self.song_progress_ms = 0;
+      self.dispatch(IoEvent::PreviousTrack);
+      return;
+    }
     // A decoded source owns the session: route to its dispatcher, never to the
     // paused librespot. Preserve the ">= 3s restarts current, else previous"
     // semantics (radio no-ops both Seek and PreviousTrack).
@@ -3344,6 +3439,13 @@ impl App {
 
   pub fn force_previous_track(&mut self) {
     info!("force skipping to previous track");
+    // The native queue owns playback: restart the current queued track (the
+    // queue router intercepts the event for both slot kinds).
+    if self.queue_owns_playback() {
+      self.song_progress_ms = 0;
+      self.dispatch(IoEvent::ForcePreviousTrack);
+      return;
+    }
     // A decoded source owns the session: route to its dispatcher, never to the
     // paused librespot. The source handles or no-ops ForcePreviousTrack.
     if self.active_decoded_source() {
@@ -5633,7 +5735,7 @@ mod tests {
     let (tx, rx) = channel();
     let mut app = App::new(tx, UserConfig::new(), Some(SystemTime::now()));
     // No playback context => not external => queue natively (Spotify tracks play
-    // via native streaming, wired in Phase 3).
+    // via native streaming).
     app.add_track_to_native_queue(queue_track(Some("spotify:track:abc"), "Spotify Song"));
     assert_eq!(app.native_queue.len(), 1);
     assert!(rx.try_recv().is_err());
@@ -5771,6 +5873,66 @@ mod tests {
     assert!(
       matches!(rx.recv().unwrap(), IoEvent::AdvanceNativeQueue),
       "expected AdvanceNativeQueue to be dispatched first"
+    );
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn spotify_queue_slot_shadows_decoded_activity_checks() {
+    use crate::infra::queue::QueueNowPlaying;
+    let (tx, _rx) = channel();
+    let mut app = App::new(tx, UserConfig::new(), Some(SystemTime::now()));
+    app.queue_now = Some(QueueNowPlaying::Spotify {
+      track: queue_track(Some("spotify:track:queued"), "Queued"),
+    });
+
+    assert!(!app.active_decoded_source());
+    assert!(app.active_source_position_ms().is_none());
+  }
+
+  #[cfg(all(feature = "streaming", feature = "audio-decode"))]
+  #[test]
+  fn spotify_queue_slot_shadows_decoded_player_lookup() {
+    use crate::infra::queue::QueueNowPlaying;
+    let (tx, _rx) = channel();
+    let mut app = App::new(tx, UserConfig::new(), Some(SystemTime::now()));
+    app.queue_now = Some(QueueNowPlaying::Spotify {
+      track: queue_track(Some("spotify:track:queued"), "Queued"),
+    });
+
+    assert!(app.active_decoded_player().is_none());
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn toggle_playback_with_spotify_queue_slot_does_not_panic() {
+    use crate::infra::queue::QueueNowPlaying;
+    let (tx, _rx) = channel();
+    let mut app = App::new(tx, UserConfig::new(), Some(SystemTime::now()));
+    app.queue_now = Some(QueueNowPlaying::Spotify {
+      track: queue_track(Some("spotify:track:queued"), "Queued"),
+    });
+
+    app.toggle_playback();
+
+    assert!(app.queue_now_is_spotify());
+  }
+
+  #[cfg(feature = "streaming")]
+  #[test]
+  fn previous_track_restarts_native_queue_when_queue_owns_playback() {
+    use crate::infra::queue::QueueNowPlaying;
+    let (tx, rx) = channel();
+    let mut app = App::new(tx, UserConfig::new(), Some(SystemTime::now()));
+    app.queue_now = Some(QueueNowPlaying::Spotify {
+      track: queue_track(Some("spotify:track:queued"), "Queued"),
+    });
+
+    app.previous_track();
+
+    assert!(
+      matches!(rx.recv().unwrap(), IoEvent::PreviousTrack),
+      "expected PreviousTrack to be dispatched for the queue router"
     );
   }
 

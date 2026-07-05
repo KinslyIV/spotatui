@@ -1,8 +1,8 @@
-//! Native cross-source queue playback engine (Phase 2).
+//! Native cross-source queue playback engine.
 //!
-//! Phase 1 built the queue *state* (`App::native_queue`, the Queue screen ops,
-//! [`SuspendedContext`](crate::core::queue::SuspendedContext), persistence).
-//! This module is the *engine* that consumes it: [`dispatch::route_queue_event`]
+//! [`App::native_queue`](crate::core::app::App::native_queue) holds the queue
+//! state, while this module is the engine that consumes it:
+//! [`dispatch::route_queue_event`]
 //! plays queued tracks through the shared decoded-audio sink, overlaying the
 //! per-source playback contexts without mutating them, and resumes the
 //! underlying context once the queue drains.

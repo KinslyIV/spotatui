@@ -1054,29 +1054,39 @@ pub async fn start_ui(
           source_owns_playback = true;
           app.song_progress_ms = d.player.position().as_millis();
         }
+        #[allow(unused_variables)]
+        let spotify_queue_slot = app.queue_now_is_spotify();
         #[cfg(feature = "local-files")]
-        if let Some(local) = app.local_playback.as_ref() {
-          source_owns_playback = true;
-          let position_ms = local.player.position().as_millis();
-          app.song_progress_ms = position_ms;
+        if !spotify_queue_slot {
+          if let Some(local) = app.local_playback.as_ref() {
+            source_owns_playback = true;
+            let position_ms = local.player.position().as_millis();
+            app.song_progress_ms = position_ms;
+          }
         }
         #[cfg(feature = "subsonic")]
-        if let Some(subsonic) = app.subsonic_playback.as_ref() {
-          source_owns_playback = true;
-          let position_ms = subsonic.player.position().as_millis();
-          app.song_progress_ms = position_ms;
+        if !spotify_queue_slot {
+          if let Some(subsonic) = app.subsonic_playback.as_ref() {
+            source_owns_playback = true;
+            let position_ms = subsonic.player.position().as_millis();
+            app.song_progress_ms = position_ms;
+          }
         }
         #[cfg(feature = "internet-radio")]
-        if let Some(radio) = app.radio_playback.as_ref() {
-          source_owns_playback = true;
-          let position_ms = radio.player.position().as_millis();
-          app.song_progress_ms = position_ms;
+        if !spotify_queue_slot {
+          if let Some(radio) = app.radio_playback.as_ref() {
+            source_owns_playback = true;
+            let position_ms = radio.player.position().as_millis();
+            app.song_progress_ms = position_ms;
+          }
         }
         #[cfg(feature = "youtube")]
-        if let Some(youtube) = app.youtube_playback.as_ref() {
-          source_owns_playback = true;
-          let position_ms = youtube.player.position().as_millis();
-          app.song_progress_ms = position_ms;
+        if !spotify_queue_slot {
+          if let Some(youtube) = app.youtube_playback.as_ref() {
+            source_owns_playback = true;
+            let position_ms = youtube.player.position().as_millis();
+            app.song_progress_ms = position_ms;
+          }
         }
 
         // Persist the active non-Spotify session so it resumes on next launch.
