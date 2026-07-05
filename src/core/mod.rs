@@ -6,6 +6,7 @@ pub mod layout;
 pub mod pagination;
 pub mod persisted_playback;
 pub mod plugin_api;
+pub mod queue;
 pub mod sort;
 pub mod source;
 #[cfg(test)]

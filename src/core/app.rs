@@ -831,6 +831,14 @@ pub struct App {
   pub devices: Option<DevicePayload>,
   pub queue: Option<QueueState>,
   pub queue_selected_index: usize,
+  /// The native cross-source playback queue (FIFO). Unlike [`Self::queue`]
+  /// (a read-only mirror of Spotify's Web-API queue), this is owned by the app
+  /// and holds tracks from any source. Phase 2 consumes it for playback.
+  pub native_queue: Vec<TrackInfo>,
+  /// How to resume the underlying per-source context after the native queue
+  /// drains. Populated by the Phase 2 playback engine; unused in Phase 1.
+  #[allow(dead_code)]
+  pub queue_suspended: Option<crate::core::queue::SuspendedContext>,
   #[cfg(feature = "cover-art")]
   pub cover_art: crate::tui::cover_art::CoverArt,
   /// Status of the current track's cover art, driving the placeholder message.
@@ -1210,6 +1218,8 @@ impl Default for App {
       devices: None,
       queue: None,
       queue_selected_index: 0,
+      native_queue: Vec::new(),
+      queue_suspended: None,
       input: vec![],
       input_idx: 0,
       input_cursor_position: 0,
@@ -1472,6 +1482,23 @@ impl App {
       });
     }
     None
+  }
+
+  /// Snapshot the full session to persist: the active non-Spotify playback (if
+  /// any) plus the native queue. Returns `None` only when there is nothing to
+  /// save (no active source *and* an empty queue), so the caller clears the
+  /// session file — preserving the existing Some→None clear semantics.
+  pub fn current_persisted_session(
+    &self,
+  ) -> Option<crate::core::persisted_playback::PersistedSession> {
+    let playback = self.current_persisted_playback();
+    if playback.is_none() && self.native_queue.is_empty() {
+      return None;
+    }
+    Some(crate::core::persisted_playback::PersistedSession {
+      playback,
+      queue: self.native_queue.clone(),
+    })
   }
 
   #[allow(dead_code)]
@@ -2625,6 +2652,53 @@ impl App {
 
     // No match - not the active device
     false
+  }
+
+  /// Whether Spotify playback is happening on an *external* Connect device
+  /// (i.e. a Spotify context exists and it is not our own native streaming
+  /// device). When true, `z` on a Spotify track keeps today's Web-API
+  /// `AddItemToQueue` behavior instead of routing to the native queue. Under a
+  /// build without native streaming, any Spotify context is external by
+  /// definition.
+  pub fn spotify_external_device_active(&self) -> bool {
+    #[cfg(feature = "streaming")]
+    {
+      self.current_playback_context.is_some() && !self.is_native_streaming_active_for_playback()
+    }
+    #[cfg(not(feature = "streaming"))]
+    {
+      self.current_playback_context.is_some()
+    }
+  }
+
+  /// Add a track to the native cross-source queue.
+  ///
+  /// Rejects tracks with no URI and radio streams (a live stream is not a finite
+  /// track). Spotify tracks on an external Connect device keep today's Web-API
+  /// queue behavior (there is no native sink to play them through); everything
+  /// else is pushed onto [`Self::native_queue`].
+  pub fn add_track_to_native_queue(&mut self, track: TrackInfo) {
+    let Some(uri) = track.uri.clone() else {
+      self.set_status_message("Cannot queue: track has no URI", 3);
+      return;
+    };
+    if uri.starts_with("radio:") {
+      self.set_status_message("Radio stations can't be queued", 3);
+      return;
+    }
+    // A Spotify track controlled on an external device has no native sink to
+    // play through, so fall back to the Spotify Web-API queue.
+    if matches!(
+      crate::core::queue::queue_item_source(&uri),
+      crate::core::queue::QueueItemSource::Spotify
+    ) && self.spotify_external_device_active()
+    {
+      self.dispatch(IoEvent::AddItemToQueue(uri));
+      return;
+    }
+    let name = track.name.clone();
+    self.native_queue.push(track);
+    self.set_status_message(format!("Queued: {name}"), 3);
   }
 
   /// Whether any decoded-audio source (local file, Subsonic, internet radio, or
@@ -4297,6 +4371,12 @@ impl App {
           value: SettingValue::Key(key_to_string(&self.user_config.keys.show_queue)),
         },
         SettingItem {
+          id: "keys.remove_from_queue".to_string(),
+          name: "Remove from Queue".to_string(),
+          description: "Remove the selected track from the queue".to_string(),
+          value: SettingValue::Key(key_to_string(&self.user_config.keys.remove_from_queue)),
+        },
+        SettingItem {
           id: "keys.like_track".to_string(),
           name: "Like Track".to_string(),
           description: "Toggle saved state for the currently playing track or episode"
@@ -4810,6 +4890,13 @@ impl App {
             }
           }
         }
+        "keys.remove_from_queue" => {
+          if let SettingValue::Key(v) = &setting.value {
+            if let Ok(key) = crate::core::user_config::parse_key_public(v.clone()) {
+              self.user_config.keys.remove_from_queue = key;
+            }
+          }
+        }
         "keys.like_track" => {
           if let SettingValue::Key(v) = &setting.value {
             if let Ok(key) = crate::core::user_config::parse_key_public(v.clone()) {
@@ -5086,6 +5173,106 @@ mod tests {
       preview_url: None,
       track_number: 1,
       r#type: rspotify::model::Type::Track,
+    }
+  }
+
+  fn queue_track(uri: Option<&str>, name: &str) -> TrackInfo {
+    TrackInfo {
+      uri: uri.map(|u| u.to_string()),
+      name: name.to_string(),
+      artists: vec!["Artist".to_string()],
+      album: "Album".to_string(),
+      duration_ms: 1000,
+      id: None,
+      album_id: None,
+      artist_refs: vec![],
+      is_playable: true,
+      is_local: false,
+      track_number: 0,
+      explicit: false,
+      image_url: None,
+    }
+  }
+
+  #[test]
+  fn add_track_to_native_queue_pushes_normal_track() {
+    let (tx, rx) = channel();
+    let mut app = App::new(tx, UserConfig::new(), Some(SystemTime::now()));
+    app.add_track_to_native_queue(queue_track(Some("subsonic:track:1"), "Song"));
+    assert_eq!(app.native_queue.len(), 1);
+    assert_eq!(app.native_queue[0].name, "Song");
+    // No Web-API dispatch for a non-Spotify item.
+    assert!(rx.try_recv().is_err());
+  }
+
+  #[test]
+  fn add_track_to_native_queue_rejects_missing_uri() {
+    let (tx, rx) = channel();
+    let mut app = App::new(tx, UserConfig::new(), Some(SystemTime::now()));
+    app.add_track_to_native_queue(queue_track(None, "No URI"));
+    assert!(app.native_queue.is_empty());
+    assert!(rx.try_recv().is_err());
+  }
+
+  #[test]
+  fn add_track_to_native_queue_rejects_radio() {
+    let (tx, rx) = channel();
+    let mut app = App::new(tx, UserConfig::new(), Some(SystemTime::now()));
+    app.add_track_to_native_queue(queue_track(Some("radio:https://example.com/live"), "Live"));
+    assert!(app.native_queue.is_empty());
+    assert!(rx.try_recv().is_err());
+  }
+
+  #[test]
+  fn add_track_to_native_queue_spotify_no_context_pushes_natively() {
+    let (tx, rx) = channel();
+    let mut app = App::new(tx, UserConfig::new(), Some(SystemTime::now()));
+    // No playback context => not external => queue natively (Spotify tracks play
+    // via native streaming, wired in Phase 3).
+    app.add_track_to_native_queue(queue_track(Some("spotify:track:abc"), "Spotify Song"));
+    assert_eq!(app.native_queue.len(), 1);
+    assert!(rx.try_recv().is_err());
+  }
+
+  #[test]
+  fn add_track_to_native_queue_spotify_external_device_dispatches_web_api() {
+    let (tx, rx) = channel();
+    let mut app = App::new(tx, UserConfig::new(), Some(SystemTime::now()));
+    // A Spotify context with no native streaming device reads as external.
+    app.current_playback_context = Some(make_external_context());
+    app.add_track_to_native_queue(queue_track(Some("spotify:track:abc"), "Spotify Song"));
+    // Routed to the Web-API queue; nothing pushed to the native queue.
+    assert!(app.native_queue.is_empty());
+    match rx.recv().unwrap() {
+      IoEvent::AddItemToQueue(uri) => assert_eq!(uri, "spotify:track:abc"),
+      _ => panic!("expected AddItemToQueue dispatch"),
+    }
+  }
+
+  #[allow(deprecated)]
+  fn make_external_context() -> CurrentPlaybackContext {
+    use rspotify::model::{
+      context::Actions, CurrentlyPlayingType, Device, DeviceType, RepeatState,
+    };
+    CurrentPlaybackContext {
+      device: Device {
+        id: Some("external".to_string()),
+        is_active: true,
+        is_private_session: false,
+        is_restricted: false,
+        name: "Phone".to_string(),
+        _type: DeviceType::Smartphone,
+        volume_percent: Some(50),
+      },
+      repeat_state: RepeatState::Off,
+      shuffle_state: false,
+      context: None,
+      timestamp: Utc::now(),
+      progress: None,
+      is_playing: true,
+      item: None,
+      currently_playing_type: CurrentlyPlayingType::Track,
+      actions: Actions::default(),
     }
   }
 

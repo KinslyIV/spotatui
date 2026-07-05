@@ -99,13 +99,14 @@ pub fn handler(key: Key, app: &mut App) {
       };
     }
     _ if key == app.user_config.keys.add_item_to_queue => {
-      if let Some(recently_played_result) = &app.recently_played.result.clone() {
-        if let Some(selected_track) = recently_played_result.items.get(app.recently_played.index) {
-          if let Some(ref id_str) = selected_track.id {
-            app.dispatch(IoEvent::AddItemToQueue(id_str.clone()));
-          };
-        };
-      };
+      let track = app
+        .recently_played
+        .result
+        .as_ref()
+        .and_then(|r| r.items.get(app.recently_played.index).cloned());
+      if let Some(track) = track {
+        app.add_track_to_native_queue(track);
+      }
     }
     _ => {}
   };

@@ -265,25 +265,18 @@ fn handle_low_press_on_selected_block(app: &mut App) {
 }
 
 fn handle_add_item_to_queue(app: &mut App) {
-  match &app.search_results.selected_block {
-    SearchResultBlock::SongSearch => {
-      if let (Some(index), Some(tracks)) = (
-        app.search_results.selected_tracks_index,
-        &app.search_results.tracks,
-      ) {
-        if let Some(track) = tracks.items.get(index) {
-          if let Some(uri) = track.uri.clone() {
-            app.dispatch(IoEvent::AddItemToQueue(uri));
-          }
-        }
-      }
+  if let SearchResultBlock::SongSearch = app.search_results.selected_block {
+    let track = app.search_results.selected_tracks_index.and_then(|index| {
+      app
+        .search_results
+        .tracks
+        .as_ref()
+        .and_then(|tracks| tracks.items.get(index).cloned())
+    });
+    if let Some(track) = track {
+      app.add_track_to_native_queue(track);
     }
-    SearchResultBlock::ArtistSearch => {}
-    SearchResultBlock::PlaylistSearch => {}
-    SearchResultBlock::AlbumSearch => {}
-    SearchResultBlock::ShowSearch => {}
-    SearchResultBlock::Empty => {}
-  };
+  }
 }
 
 fn handle_enter_event_on_selected_block(app: &mut App) {

@@ -477,71 +477,23 @@ fn on_enter(app: &mut App) {
 }
 
 fn on_queue(app: &mut App) {
-  let TrackTable {
-    context,
-    selected_index,
-    tracks,
-  } = &app.track_table;
-  if let Some(context) = &context {
-    match context {
-      TrackTableContext::MyPlaylists | TrackTableContext::PlaylistSearch => {
-        if let Some(track) = tracks.get(*selected_index) {
-          if let Some(playable_id) = track.uri.clone() {
-            app.dispatch(IoEvent::AddItemToQueue(playable_id));
-          }
-        };
-      }
-      TrackTableContext::RecommendedTracks => {
-        if let Some(track) = tracks.get(*selected_index) {
-          if let Some(playable_id) = track.uri.clone() {
-            app.dispatch(IoEvent::AddItemToQueue(playable_id));
-          }
-        }
-      }
-      TrackTableContext::SavedTracks => {
-        if let Some(track) = tracks.get(*selected_index) {
-          if let Some(playable_id) = track.uri.clone() {
-            app.dispatch(IoEvent::AddItemToQueue(playable_id));
-          }
-        }
-      }
-      TrackTableContext::AlbumSearch => {}
-      TrackTableContext::DiscoverPlaylist => {
-        if let Some(track) = tracks.get(*selected_index) {
-          if let Some(playable_id) = track.uri.clone() {
-            app.dispatch(IoEvent::AddItemToQueue(playable_id));
-          }
-        }
-      }
-      // Append the selected file to the live local queue. This is pure in-memory
-      // state (no async player work), so it mutates `App` directly rather than
-      // dispatching. Without an active local session there is no queue to append
-      // to; tell the user to start playback first.
-      TrackTableContext::LocalPlaylist => {
-        #[cfg(feature = "local-files")]
-        if let Some(uri) = tracks.get(*selected_index).and_then(|t| t.uri.clone()) {
-          let name = tracks
-            .get(*selected_index)
-            .map(|t| t.name.clone())
-            .unwrap_or_default();
-          match app.local_playback.as_mut() {
-            Some(local) => {
-              local.queue.push(uri);
-              app.set_status_message(format!("Added to queue: {name}"), 3);
-            }
-            None => {
-              app.set_status_message("Play a local track first to start a queue", 3);
-            }
-          }
-        }
-      }
-      // Subsonic queue-append needs an active subsonic session (wired in M3).
-      TrackTableContext::SubsonicPlaylist => {}
-      // YouTube queue-append would need to splice the live download queue;
-      // start playback from the row instead (Enter). Tracked follow-up.
-      TrackTableContext::YouTubePlaylist => {}
-    }
-  };
+  // Every context except AlbumSearch holds full `TrackInfo` rows, so the queue
+  // action collapses to one path: clone the selected row and hand it to the
+  // native cross-source queue, which routes by URI scheme (Spotify tracks on an
+  // external device still fall back to the Web-API queue). AlbumSearch rows lack
+  // full track info, so it stays a no-op.
+  match app.track_table.context {
+    Some(TrackTableContext::AlbumSearch) | None => return,
+    Some(_) => {}
+  }
+  if let Some(track) = app
+    .track_table
+    .tracks
+    .get(app.track_table.selected_index)
+    .cloned()
+  {
+    app.add_track_to_native_queue(track);
+  }
 }
 
 fn jump_to_start(app: &mut App) {
@@ -623,6 +575,36 @@ mod tests {
     SavedTrack {
       added_at: Utc::now(),
       track: full_track(id, name),
+    }
+  }
+
+  /// A Spotify playback context on some non-native device. In a slim (no
+  /// streaming) build, any Spotify context reads as an external device.
+  #[allow(deprecated)]
+  fn external_spotify_context() -> rspotify::model::context::CurrentPlaybackContext {
+    use rspotify::model::{
+      context::{Actions, CurrentPlaybackContext},
+      CurrentlyPlayingType, Device, DeviceType, RepeatState,
+    };
+    CurrentPlaybackContext {
+      device: Device {
+        id: Some("external-device".to_string()),
+        is_active: true,
+        is_private_session: false,
+        is_restricted: false,
+        name: "Phone".to_string(),
+        _type: DeviceType::Smartphone,
+        volume_percent: Some(50),
+      },
+      repeat_state: RepeatState::Off,
+      shuffle_state: false,
+      context: None,
+      timestamp: Utc::now(),
+      progress: None,
+      is_playing: true,
+      item: None,
+      currently_playing_type: CurrentlyPlayingType::Track,
+      actions: Actions::default(),
     }
   }
 
@@ -728,7 +710,7 @@ mod tests {
   }
 
   #[test]
-  fn saved_tracks_queue_uses_continuous_row_selection() {
+  fn saved_tracks_queue_pushes_selected_row_to_native_queue() {
     let (mut app, rx) = app_with_saved_tracks();
     let first_page = saved_tracks_page(
       0,
@@ -759,12 +741,42 @@ mod tests {
 
     on_queue(&mut app);
 
+    // With no external Spotify device active, the track lands in the native
+    // queue and no Web-API AddItemToQueue is dispatched.
+    assert_eq!(app.native_queue.len(), 1);
+    assert_eq!(
+      app.native_queue[0].uri.as_deref(),
+      Some("spotify:track:0000000000000000000004")
+    );
+    assert!(rx.try_recv().is_err());
+  }
+
+  #[test]
+  fn saved_tracks_queue_on_external_device_dispatches_web_api_add() {
+    let (mut app, rx) = app_with_saved_tracks();
+    let page = saved_tracks_page(
+      0,
+      &["0000000000000000000001", "0000000000000000000002"],
+      false,
+    );
+    app.library.saved_tracks.upsert_page_by_offset(page.clone());
+    app.library.saved_tracks.index = 0;
+    app.track_table.selected_index = 1;
+    app.track_table.tracks = page.items.to_vec();
+    // Simulate controlling an external Spotify Connect device: any Spotify
+    // context with no native streaming device counts as external in the slim
+    // build, so `z` keeps today's Web-API queue behavior.
+    app.current_playback_context = Some(external_spotify_context());
+
+    on_queue(&mut app);
+
     match rx.recv().unwrap() {
-      IoEvent::AddItemToQueue(playable_id) => {
-        assert_eq!(playable_id, "spotify:track:0000000000000000000004");
+      IoEvent::AddItemToQueue(uri) => {
+        assert_eq!(uri, "spotify:track:0000000000000000000002");
       }
       other => panic!("unexpected event: {:?}", event_name(&other)),
     }
+    assert!(app.native_queue.is_empty());
   }
 
   #[test]

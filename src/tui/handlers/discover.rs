@@ -76,16 +76,14 @@ pub fn handler(key: Key, app: &mut App) {
       }
     }
     _ if key == app.user_config.keys.add_item_to_queue => {
-      // Add selected track from top tracks to queue if available
-      let tracks = match app.discover_selected_index {
-        0 => &app.discover_artists_mix,
-        1 => &app.discover_top_tracks,
-        _ => return,
+      // Add the first track from the selected discover list to the queue.
+      let track = match app.discover_selected_index {
+        0 => app.discover_artists_mix.first().cloned(),
+        1 => app.discover_top_tracks.first().cloned(),
+        _ => None,
       };
-      if let Some(track) = tracks.first() {
-        if let Some(uri) = track.uri.clone() {
-          app.dispatch(IoEvent::AddItemToQueue(uri));
-        }
+      if let Some(track) = track {
+        app.add_track_to_native_queue(track);
       }
     }
     _ => {}

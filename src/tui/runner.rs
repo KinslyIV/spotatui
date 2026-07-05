@@ -1036,7 +1036,7 @@ pub async fn start_ui(
         // Persist the active non-Spotify session so it resumes on next launch.
         // Throttled to avoid churning the file every tick; a Some -> None
         // transition (queue ended, or switched to Spotify) clears it instead.
-        match app.current_persisted_playback() {
+        match app.current_persisted_session() {
           Some(session) => {
             let due = last_session_save
               .map(|t| t.elapsed() >= SESSION_SAVE_INTERVAL)
@@ -1170,7 +1170,7 @@ pub async fn start_ui(
   // quit (the throttled in-loop save is up to a few seconds stale). Done
   // synchronously before teardown so the player is still alive to read from.
   {
-    let session = app.lock().await.current_persisted_playback();
+    let session = app.lock().await.current_persisted_session();
     if let Some(session) = session {
       if let Ok(path) = crate::core::persisted_playback::default_session_path() {
         if let Err(e) = crate::core::persisted_playback::save(&path, &session) {

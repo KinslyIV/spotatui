@@ -360,6 +360,16 @@ pub fn get_help_docs(app: &App) -> Vec<Vec<String>> {
       String::from("General"),
     ],
     vec![
+      String::from("Remove selected track from queue"),
+      key_bindings.remove_from_queue.to_string(),
+      String::from("Queue"),
+    ],
+    vec![
+      String::from("Move selected queue item down / up"),
+      String::from("J / K"),
+      String::from("Queue"),
+    ],
+    vec![
       String::from("Toggle saved state for currently playing track/episode"),
       key_bindings.like_track.to_string(),
       String::from("General"),

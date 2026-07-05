@@ -742,7 +742,7 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
   // the browse source was later switched to Spotify while the song kept playing
   // (browse-source and playback-source are deliberately decoupled). A session
   // whose source feature isn't compiled into this build is a no-op on restore.
-  let restore_session: Option<crate::core::persisted_playback::PersistedPlayback> =
+  let restore_session: Option<crate::core::persisted_playback::PersistedSession> =
     match crate::core::persisted_playback::default_session_path()
       .and_then(|path| crate::core::persisted_playback::load(&path))
     {
@@ -752,6 +752,16 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
         None
       }
     };
+  // Split the session: the playback (if any) drives the source resume, while the
+  // native queue is restored into app state regardless of whether a source is
+  // resumed (a queue-only session must not suppress Spotify's device transfer).
+  let (restore_playback, restore_queue): (
+    Option<crate::core::persisted_playback::PersistedPlayback>,
+    Vec<crate::core::plugin_api::TrackInfo>,
+  ) = match restore_session {
+    Some(s) => (s.playback, s.queue),
+    None => (None, Vec::new()),
+  };
 
   if let Some(tick_rate) = matches
     .get_one::<String>("tick-rate")
@@ -1370,7 +1380,7 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
         // to a device on startup — that would fight the restored source for the
         // audio output. Treat the device decision as passive (Continue); the
         // device list is still fetched above for the UI.
-        let device_startup_behavior = if restore_session.is_some() {
+        let device_startup_behavior = if restore_playback.is_some() {
           StartupBehavior::Continue
         } else {
           initial_startup_behavior
@@ -1396,7 +1406,12 @@ screens more often and cost more CPU. Animation-heavy views keep their separate 
       // startup behavior for its own play/pause decision. Otherwise fall back to
       // the Spotify startup play behavior. Continue is passive and must not
       // transfer devices, change shuffle, or otherwise activate Spotatui.
-      if let Some(session) = restore_session {
+      // Restore the persisted native queue into app state before the runner
+      // starts, independent of whether a source playback is resumed.
+      if !restore_queue.is_empty() {
+        network.app.lock().await.native_queue = restore_queue;
+      }
+      if let Some(session) = restore_playback {
         // Resume off the event pump: a slow source (yt-dlp download, remote
         // fetch) must not stall the Spotify startup events the UI's first render
         // queues (user, playlists, current playback). The restore drives the

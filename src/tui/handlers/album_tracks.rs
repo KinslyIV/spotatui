@@ -77,34 +77,21 @@ pub fn handler(key: Key, app: &mut App) {
     Key::Char('r') => {
       handle_recommended_tracks(app);
     }
-    _ if key == app.user_config.keys.add_item_to_queue => match app.album_table_context {
-      AlbumTableContext::Full => {
-        if let Some(selected_album) = app.selected_album_full.clone() {
-          if let Some(track) = selected_album
-            .album
-            .tracks
-            .get(app.saved_album_tracks_index)
-          {
-            if let Some(track_id_str) = &track.id {
-              app.dispatch(IoEvent::AddItemToQueue(track_id_str.clone()));
-            }
-          }
-        };
+    _ if key == app.user_config.keys.add_item_to_queue => {
+      let track = match app.album_table_context {
+        AlbumTableContext::Full => app
+          .selected_album_full
+          .as_ref()
+          .and_then(|a| a.album.tracks.get(app.saved_album_tracks_index).cloned()),
+        AlbumTableContext::Simplified => app
+          .selected_album_simplified
+          .as_ref()
+          .and_then(|a| a.tracks.items.get(a.selected_index).cloned()),
+      };
+      if let Some(track) = track {
+        app.add_track_to_native_queue(track);
       }
-      AlbumTableContext::Simplified => {
-        if let Some(selected_album_simplified) = &app.selected_album_simplified.clone() {
-          if let Some(track) = selected_album_simplified
-            .tracks
-            .items
-            .get(selected_album_simplified.selected_index)
-          {
-            if let Some(track_id_str) = &track.id {
-              app.dispatch(IoEvent::AddItemToQueue(track_id_str.clone()));
-            }
-          }
-        };
-      }
-    },
+    }
     _ => {}
   };
 }

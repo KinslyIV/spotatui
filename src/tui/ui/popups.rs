@@ -93,28 +93,48 @@ pub fn draw_queue(f: &mut Frame<'_>, app: &App) {
     .layout(&Layout::vertical([Constraint::Percentage(100)]).margin(2));
 
   let style = app.user_config.theme.base_style();
-  let items: Vec<ListItem> = match &app.queue {
-    None => vec![ListItem::new(Span::raw("Loading...")).style(style)],
-    Some(q) => {
-      let mut rows = Vec::new();
-      if let Some(ref now) = q.currently_playing {
-        rows.push(
-          ListItem::new(Line::from(vec![
-            Span::styled("Now playing: ", style.add_modifier(Modifier::BOLD)),
-            Span::raw(queue_item_line(now)),
-          ]))
-          .style(style),
-        );
+  let mut items: Vec<ListItem> = Vec::new();
+
+  // Row 0: "Now playing" header. Still sourced from the Spotify Web-API mirror
+  // for now; Phase 2 rewires it to the native queue slot's current track.
+  let now = app
+    .queue
+    .as_ref()
+    .and_then(|q| q.currently_playing.as_ref());
+  let now_text = now.map(queue_item_line).unwrap_or_else(|| "—".to_string());
+  items.push(
+    ListItem::new(Line::from(vec![
+      Span::styled("Now playing: ", style.add_modifier(Modifier::BOLD)),
+      Span::raw(now_text),
+    ]))
+    .style(style),
+  );
+
+  // The native queue is the selectable list.
+  if app.native_queue.is_empty() {
+    // With an empty native queue, fall back to displaying the legacy Spotify
+    // mirror only when controlling an external Connect device (the queue there
+    // lives Spotify-side). Otherwise show a hint.
+    if app.spotify_external_device_active() {
+      if let Some(q) = app.queue.as_ref() {
+        for item in &q.queue {
+          items.push(ListItem::new(queue_item_line(item)).style(style));
+        }
       }
-      for item in &q.queue {
-        rows.push(ListItem::new(queue_item_line(item)).style(style));
-      }
-      if rows.is_empty() {
-        rows.push(ListItem::new(Span::raw("No queue (no active device?)")).style(style));
-      }
-      rows
+    } else {
+      items.push(
+        ListItem::new(Span::raw("Queue is empty — press z on a track to add it")).style(style),
+      );
     }
-  };
+  } else {
+    for track in &app.native_queue {
+      let label = crate::core::queue::source_label(crate::core::queue::queue_item_source(
+        track.uri.as_deref().unwrap_or(""),
+      ));
+      let line = format!("{} - {}  [{}]", track.name, track.artists.join(", "), label);
+      items.push(ListItem::new(line).style(style));
+    }
+  }
 
   let mut state = ListState::default();
   let len = items.len();
@@ -129,7 +149,10 @@ pub fn draw_queue(f: &mut Frame<'_>, app: &App) {
       Block::default()
         .borders(Borders::ALL)
         .style(style)
-        .title(Span::styled("Queue (press Esc to go back)", style))
+        .title(Span::styled(
+          "Queue  (x remove · J/K move · Enter play · Esc back)",
+          style,
+        ))
         .border_style(style),
     )
     .style(style)

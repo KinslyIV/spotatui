@@ -673,6 +673,7 @@ pub struct KeyBindingsString {
   cover_art_view: Option<String>,
   add_item_to_queue: Option<String>,
   show_queue: Option<String>,
+  remove_from_queue: Option<String>,
   open_settings: Option<String>,
   save_settings: Option<String>,
   listening_party: Option<String>,
@@ -716,6 +717,7 @@ pub struct KeyBindings {
   pub cover_art_view: Key,
   pub add_item_to_queue: Key,
   pub show_queue: Key,
+  pub remove_from_queue: Key,
   pub open_settings: Key,
   pub save_settings: Key,
   pub listening_party: Key,
@@ -937,6 +939,7 @@ impl UserConfig {
         cover_art_view: Key::Char('G'),
         add_item_to_queue: Key::Char('z'),
         show_queue: Key::Char('Q'),
+        remove_from_queue: Key::Char('x'),
         // On macOS, use Ctrl+, for settings since Alt+, produces ≤ on most keyboard layouts
         // On other platforms, keep Alt+, for consistency with many apps
         open_settings: if is_macos {
@@ -1087,6 +1090,7 @@ impl UserConfig {
     to_keys!(cover_art_view);
     to_keys!(add_item_to_queue);
     to_keys!(show_queue);
+    to_keys!(remove_from_queue);
     to_keys!(open_settings);
     to_keys!(save_settings);
     to_keys!(listening_party);
@@ -1665,6 +1669,7 @@ impl UserConfig {
       cover_art_view: Some(key_to_config_string(self.keys.cover_art_view)),
       add_item_to_queue: Some(key_to_config_string(self.keys.add_item_to_queue)),
       show_queue: Some(key_to_config_string(self.keys.show_queue)),
+      remove_from_queue: Some(key_to_config_string(self.keys.remove_from_queue)),
       open_settings: Some(key_to_config_string(self.keys.open_settings)),
       save_settings: Some(key_to_config_string(self.keys.save_settings)),
       listening_party: Some(key_to_config_string(self.keys.listening_party)),

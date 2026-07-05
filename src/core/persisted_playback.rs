@@ -32,6 +32,25 @@ use std::path::{Path, PathBuf};
 
 const FILE_NAME: &str = "last_session.yml";
 
+/// The full persisted session: the active non-Spotify playback (if any) plus the
+/// native cross-source queue. Wraps [`PersistedPlayback`] so the queue can be
+/// persisted independently of whichever source (if any) owns playback.
+///
+/// `deny_unknown_fields` is load-bearing: [`load`] parses this wrapper *first*,
+/// and a legacy file is a bare top-level [`PersistedPlayback`] whose `source`
+/// tag key would otherwise be silently ignored here (serde ignores unknown
+/// fields by default), yielding an empty session and dropping the saved
+/// playback. Rejecting unknown fields forces the legacy file to fail this parse
+/// so [`load`] falls through to the legacy path.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct PersistedSession {
+  #[serde(default)]
+  pub playback: Option<PersistedPlayback>,
+  #[serde(default)]
+  pub queue: Vec<TrackInfo>,
+}
+
 /// Environment override for the session file location (used by tests, and
 /// available to users who keep their config elsewhere).
 pub const PATH_ENV: &str = "SPOTATUI_LAST_SESSION_PATH";
@@ -83,11 +102,26 @@ pub fn default_session_path() -> Result<PathBuf> {
 /// Load the persisted session. A missing file means "no session to resume"
 /// (`Ok(None)`); a malformed file is an error the caller logs and ignores
 /// (never crash startup over an auto-written file).
-pub fn load(path: &Path) -> Result<Option<PersistedPlayback>> {
+///
+/// Parses the current [`PersistedSession`] wrapper first, then falls back to a
+/// legacy top-level [`PersistedPlayback`] (files written before the queue
+/// existed), wrapping it with an empty queue. This is an explicit two-step
+/// parse — see the note on [`PersistedSession`] for why the ordering is safe.
+pub fn load(path: &Path) -> Result<Option<PersistedSession>> {
   match std::fs::read_to_string(path) {
-    Ok(contents) => serde_yaml::from_str(&contents)
-      .map(Some)
-      .with_context(|| format!("malformed session file: {}", path.display())),
+    Ok(contents) => {
+      if let Ok(session) = serde_yaml::from_str::<PersistedSession>(&contents) {
+        return Ok(Some(session));
+      }
+      serde_yaml::from_str::<PersistedPlayback>(&contents)
+        .map(|playback| {
+          Some(PersistedSession {
+            playback: Some(playback),
+            queue: Vec::new(),
+          })
+        })
+        .with_context(|| format!("malformed session file: {}", path.display()))
+    }
     Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
     Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
   }
@@ -95,7 +129,7 @@ pub fn load(path: &Path) -> Result<Option<PersistedPlayback>> {
 
 /// Save the session atomically (write a sibling tempfile, then rename) so a
 /// crash mid-write can't leave a half-written file that fails to parse.
-pub fn save(path: &Path, session: &PersistedPlayback) -> Result<()> {
+pub fn save(path: &Path, session: &PersistedSession) -> Result<()> {
   let yaml = serde_yaml::to_string(session).context("serializing playback session")?;
   if let Some(dir) = path.parent() {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -138,6 +172,10 @@ mod tests {
     }
   }
 
+  fn session(playback: Option<PersistedPlayback>, queue: Vec<TrackInfo>) -> PersistedSession {
+    PersistedSession { playback, queue }
+  }
+
   #[test]
   fn missing_file_is_no_session() {
     let dir = tempfile::tempdir().unwrap();
@@ -146,17 +184,77 @@ mod tests {
   }
 
   #[test]
-  fn save_then_load_round_trips_a_youtube_queue() {
+  fn save_then_load_round_trips_a_youtube_playback() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("last_session.yml");
-    let session = PersistedPlayback::YouTube {
-      tracks: vec![track("youtube:aaa", "A"), track("youtube:bbb", "B")],
+    let s = session(
+      Some(PersistedPlayback::YouTube {
+        tracks: vec![track("youtube:aaa", "A"), track("youtube:bbb", "B")],
+        index: 1,
+        position_ms: 42_000,
+        paused: true,
+      }),
+      vec![],
+    );
+    save(&path, &s).unwrap();
+    assert_eq!(load(&path).unwrap(), Some(s));
+  }
+
+  #[test]
+  fn save_then_load_round_trips_playback_with_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("last_session.yml");
+    let s = session(
+      Some(PersistedPlayback::Subsonic {
+        tracks: vec![track("subsonic:track:1", "Sub")],
+        index: 0,
+        position_ms: 5_000,
+        paused: false,
+      }),
+      vec![
+        track("spotify:track:xyz", "Queued A"),
+        track("file:///b.mp3", "Queued B"),
+      ],
+    );
+    save(&path, &s).unwrap();
+    assert_eq!(load(&path).unwrap(), Some(s));
+  }
+
+  #[test]
+  fn save_then_load_round_trips_queue_only_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("last_session.yml");
+    // No active playback source, but the native queue has items to persist.
+    let s = session(None, vec![track("spotify:track:only", "Just Queued")]);
+    save(&path, &s).unwrap();
+    let loaded = load(&path).unwrap().expect("should load");
+    assert!(loaded.playback.is_none());
+    assert_eq!(loaded.queue.len(), 1);
+    assert_eq!(loaded.queue[0].name, "Just Queued");
+  }
+
+  #[test]
+  fn legacy_top_level_playback_file_loads_with_empty_queue() {
+    // A file written before the queue existed is a bare top-level enum with a
+    // `source` tag; it must still resume playback (and load an empty queue).
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("last_session.yml");
+    let legacy = PersistedPlayback::YouTube {
+      tracks: vec![
+        track("youtube:aaa", "Legacy A"),
+        track("youtube:bbb", "Legacy B"),
+      ],
       index: 1,
-      position_ms: 42_000,
+      position_ms: 12_345,
       paused: true,
     };
-    save(&path, &session).unwrap();
-    assert_eq!(load(&path).unwrap(), Some(session));
+    let legacy_yaml = serde_yaml::to_string(&legacy).unwrap();
+    std::fs::write(&path, legacy_yaml).unwrap();
+
+    let loaded = load(&path).unwrap().expect("legacy file should load");
+    assert!(loaded.queue.is_empty());
+    // The discriminating assertion: the legacy playback survives the fallback.
+    assert_eq!(loaded.playback, Some(legacy));
   }
 
   #[test]
@@ -165,12 +263,15 @@ mod tests {
     let path = dir.path().join("last_session.yml");
     save(
       &path,
-      &PersistedPlayback::Local {
-        queue: vec!["file:///music/a.mp3".to_string()],
-        index: 0,
-        position_ms: 0,
-        paused: false,
-      },
+      &session(
+        Some(PersistedPlayback::Local {
+          queue: vec!["file:///music/a.mp3".to_string()],
+          index: 0,
+          position_ms: 0,
+          paused: false,
+        }),
+        vec![],
+      ),
     )
     .unwrap();
     assert!(path.exists());

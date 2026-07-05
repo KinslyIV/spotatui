@@ -318,14 +318,18 @@ pub fn handler(key: Key, app: &mut App) {
         _ => (),
       },
       _ if key == app.user_config.keys.add_item_to_queue => {
-        if let Some(artist) = &app.artist {
+        let track = app.artist.as_ref().and_then(|artist| {
           if let ArtistBlock::TopTracks = artist.artist_selected_block {
-            if let Some(track) = artist.top_tracks.get(artist.selected_top_track_index) {
-              if let Some(id_str) = &track.id {
-                app.dispatch(IoEvent::AddItemToQueue(id_str.clone()));
-              }
-            };
+            artist
+              .top_tracks
+              .get(artist.selected_top_track_index)
+              .cloned()
+          } else {
+            None
           }
+        });
+        if let Some(track) = track {
+          app.add_track_to_native_queue(track);
         }
       }
       _ => {}
