@@ -1811,29 +1811,33 @@ impl App {
 
   /// Get the number of items visible in the current folder level.
   pub fn get_playlist_display_count(&self) -> usize {
-    self
-      .playlist_folder_items
-      .iter()
-      .filter(|item| self.is_playlist_item_visible_in_current_folder(item))
-      .count()
+    self.get_playlist_display_items().len()
   }
 
   /// Get a visible item by display index in the current folder.
   pub fn get_playlist_display_item_at(&self, display_index: usize) -> Option<&PlaylistFolderItem> {
     self
-      .playlist_folder_items
-      .iter()
-      .filter(|item| self.is_playlist_item_visible_in_current_folder(item))
+      .get_playlist_display_items()
+      .into_iter()
       .nth(display_index)
   }
 
   /// Get visible playlist items in the current folder (used by UI rendering).
+  ///
+  /// Single source of truth for the visible order: rendering and index-based
+  /// selection (keyboard + mouse) both go through it, so they can never
+  /// disagree. When `group_folders_first` is set, folders are hoisted to the
+  /// top via a stable sort, preserving each group's relative order.
   pub fn get_playlist_display_items(&self) -> Vec<&PlaylistFolderItem> {
-    self
+    let mut items: Vec<&PlaylistFolderItem> = self
       .playlist_folder_items
       .iter()
       .filter(|item| self.is_playlist_item_visible_in_current_folder(item))
-      .collect()
+      .collect();
+    if self.user_config.behavior.group_folders_first {
+      items.sort_by_key(|item| !matches!(item, PlaylistFolderItem::Folder(_)));
+    }
+    items
   }
 
   /// Get the playlist for a PlaylistFolderItem::Playlist variant
@@ -3978,6 +3982,12 @@ impl App {
           value: SettingValue::Bool(self.user_config.behavior.enforce_wide_search_bar),
         },
         SettingItem {
+          id: "behavior.group_folders_first".to_string(),
+          name: "Playlist Folders First".to_string(),
+          description: "List folders at the top of the Playlists tab".to_string(),
+          value: SettingValue::Bool(self.user_config.behavior.group_folders_first),
+        },
+        SettingItem {
           id: "behavior.disable_mouse_inputs".to_string(),
           name: "Disable Mouse Inputs".to_string(),
           description: "Disable mouse inputs for keyboard-only navigation".to_string(),
@@ -4491,6 +4501,11 @@ impl App {
         "behavior.enforce_wide_search_bar" => {
           if let SettingValue::Bool(v) = &setting.value {
             self.user_config.behavior.enforce_wide_search_bar = *v;
+          }
+        }
+        "behavior.group_folders_first" => {
+          if let SettingValue::Bool(v) = &setting.value {
+            self.user_config.behavior.group_folders_first = *v;
           }
         }
         "behavior.disable_mouse_inputs" => {
@@ -5072,6 +5087,57 @@ mod tests {
       track_number: 1,
       r#type: rspotify::model::Type::Track,
     }
+  }
+
+  #[test]
+  fn group_folders_first_hoists_folders_stably_and_only_when_enabled() {
+    fn folder(name: &str) -> PlaylistFolderItem {
+      PlaylistFolderItem::Folder(PlaylistFolder {
+        name: name.to_string(),
+        current_id: 0,
+        target_id: 1,
+      })
+    }
+    fn playlist(index: usize) -> PlaylistFolderItem {
+      PlaylistFolderItem::Playlist {
+        index,
+        current_id: 0,
+      }
+    }
+    // Interleaved: playlist, folder A, playlist, folder B (all at root level).
+    let mut app = App {
+      playlist_folder_items: vec![playlist(0), folder("A"), playlist(1), folder("B")],
+      ..Default::default()
+    };
+
+    // Off (default): order is untouched.
+    app.user_config.behavior.group_folders_first = false;
+    let names: Vec<&str> = app
+      .get_playlist_display_items()
+      .iter()
+      .map(|i| match i {
+        PlaylistFolderItem::Folder(f) => f.name.as_str(),
+        PlaylistFolderItem::Playlist { .. } => "P",
+      })
+      .collect();
+    assert_eq!(names, vec!["P", "A", "P", "B"]);
+
+    // On: folders float to the top; both groups keep their relative order.
+    app.user_config.behavior.group_folders_first = true;
+    let names: Vec<&str> = app
+      .get_playlist_display_items()
+      .iter()
+      .map(|i| match i {
+        PlaylistFolderItem::Folder(f) => f.name.as_str(),
+        PlaylistFolderItem::Playlist { .. } => "P",
+      })
+      .collect();
+    assert_eq!(names, vec!["A", "B", "P", "P"]);
+    // Selection index resolves against the same reordered list.
+    assert!(matches!(
+      app.get_playlist_display_item_at(0),
+      Some(PlaylistFolderItem::Folder(_))
+    ));
   }
 
   #[cfg(feature = "streaming")]

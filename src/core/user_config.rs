@@ -748,6 +748,7 @@ pub struct BehaviorConfigString {
   pub enable_text_emphasis: Option<bool>,
   pub show_loading_indicator: Option<bool>,
   pub enforce_wide_search_bar: Option<bool>,
+  pub group_folders_first: Option<bool>,
   pub enable_global_song_count: Option<bool>,
   pub disable_mouse_inputs: Option<bool>,
   pub enable_discord_rpc: Option<bool>,
@@ -801,6 +802,7 @@ pub struct BehaviorConfig {
   pub enable_text_emphasis: bool,
   pub show_loading_indicator: bool,
   pub enforce_wide_search_bar: bool,
+  pub group_folders_first: bool,
   pub enable_global_song_count: bool,
   pub disable_mouse_inputs: bool,
   pub enable_discord_rpc: bool,
@@ -957,6 +959,7 @@ impl UserConfig {
         enable_text_emphasis: true,
         show_loading_indicator: true,
         enforce_wide_search_bar: false,
+        group_folders_first: false,
         enable_global_song_count: true,
         disable_mouse_inputs: false,
         enable_discord_rpc: true,
@@ -1214,6 +1217,10 @@ impl UserConfig {
 
     if let Some(wide_search_bar) = behavior_config.enforce_wide_search_bar {
       self.behavior.enforce_wide_search_bar = wide_search_bar;
+    }
+
+    if let Some(group_folders_first) = behavior_config.group_folders_first {
+      self.behavior.group_folders_first = group_folders_first;
     }
 
     if let Some(liked_icon) = behavior_config.liked_icon {
@@ -1536,6 +1543,7 @@ impl UserConfig {
       enable_text_emphasis: Some(self.behavior.enable_text_emphasis),
       show_loading_indicator: Some(self.behavior.show_loading_indicator),
       enforce_wide_search_bar: Some(self.behavior.enforce_wide_search_bar),
+      group_folders_first: Some(self.behavior.group_folders_first),
       enable_global_song_count: Some(self.behavior.enable_global_song_count),
       disable_mouse_inputs: Some(self.behavior.disable_mouse_inputs),
       enable_discord_rpc: Some(self.behavior.enable_discord_rpc),

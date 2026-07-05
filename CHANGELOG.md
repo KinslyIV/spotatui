@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Playlist Folders First setting**: A new `behavior.group_folders_first` toggle (Settings → "Playlist Folders First") lists your Spotify playlist folders at the top of the Playlists tab, above playlists, keeping each group's existing order. Off by default. Handy because folders keep their creation date and otherwise sink to the bottom of the recency-sorted list.
+
 ## [v0.40.1] 2026-07-04
 
 ### Changed
