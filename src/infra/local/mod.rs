@@ -292,11 +292,11 @@ impl Streamer for LocalSource {
   ///   before wiring — std::fs::File::open and symphonia probing are synchronous
   ///   and will stall the Tokio executor thread on slow/remote filesystems.
   async fn stream(&self, uri: &str) -> Result<()> {
-    use symphonia::core::codecs::DecoderOptions;
-    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::codecs::audio::AudioDecoderOptions;
+    use symphonia::core::formats::probe::Hint;
+    use symphonia::core::formats::{FormatOptions, TrackType};
     use symphonia::core::io::MediaSourceStream;
     use symphonia::core::meta::MetadataOptions;
-    use symphonia::core::probe::Hint;
 
     let path =
       file_uri_to_path(uri).with_context(|| format!("parsing track URI for streaming: {uri}"))?;
@@ -311,26 +311,30 @@ impl Streamer for LocalSource {
       hint.with_extension(ext);
     }
 
-    let probed = symphonia::default::get_probe()
-      .format(
+    let format = symphonia::default::get_probe()
+      .probe(
         &hint,
         mss,
-        &FormatOptions::default(),
-        &MetadataOptions::default(),
+        FormatOptions::default(),
+        MetadataOptions::default(),
       )
       .context("probing audio format")?;
 
-    let format = probed.format;
-
-    // Find the first audio track.
+    // Find the first audio track with a known codec.
     let track = format
-      .tracks()
-      .iter()
-      .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
+      .default_track(TrackType::Audio)
       .context("no audio tracks found in file")?;
 
     let _decoder = symphonia::default::get_codecs()
-      .make(&track.codec_params, &DecoderOptions::default())
+      .make_audio_decoder(
+        track
+          .codec_params
+          .as_ref()
+          .context("codec parameters missing")?
+          .audio()
+          .context("track is not an audio codec")?,
+        &AudioDecoderOptions::default(),
+      )
       .context("constructing audio decoder")?;
 
     // TODO(multi-source): route decoded frames into the shared sink (Phase 3 wiring)
