@@ -342,6 +342,16 @@ behavior:
 
 You can also override via `SPOTATUI_DISCORD_APP_ID` or disable in the setting or by setting `behavior.enable_discord_rpc: false` in ~/.config/spotatui/config.yml.
 
+### GitHub Profile Widget
+
+Show what you're listening to as a live card on your GitHub profile. Create an account at [spotatui.com](https://spotatui.com), paste your sync token into Settings → `sync_token`, then pick a public username and enable the widget on your dashboard. Add this to your profile README:
+
+```markdown
+[![Now playing on spotatui](https://spotatui.com/widget/your-username.svg)](https://spotatui.com)
+```
+
+The card shows cover art, title, artist, a progress bar, and an animated equalizer while playing; internet radio gets a LIVE badge. Append `?theme=light` for the light variant. Only your current track is public, and only after you opt in.
+
 ## Plugins
 
 spotatui runs user-written Lua plugins. They react to playback events, add commands and key

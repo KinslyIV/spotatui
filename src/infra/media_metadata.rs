@@ -45,6 +45,8 @@ pub struct PlaybackSnapshot {
   pub source: PlaybackSource,
   pub progress_ms: u128,
   pub is_playing: bool,
+  /// True only for internet-radio live streams (no track duration, ICY metadata).
+  pub is_live: bool,
   pub shuffle: bool,
   pub repeat: Option<RepeatState>,
 }
@@ -140,6 +142,7 @@ pub fn current_playback_snapshot(app: &App) -> Option<PlaybackSnapshot> {
     source,
     progress_ms: app.song_progress_ms,
     is_playing,
+    is_live: false,
     shuffle,
     repeat,
   })
@@ -234,7 +237,7 @@ fn source_playback_snapshot(app: &App) -> Option<PlaybackSnapshot> {
         radio.station.artists.join(", ")
       }
     });
-    return Some(source_snapshot(
+    let mut snapshot = source_snapshot(
       radio.station.name.clone(),
       vec![artists],
       radio.station.album.clone(),
@@ -245,7 +248,9 @@ fn source_playback_snapshot(app: &App) -> Option<PlaybackSnapshot> {
       radio.player.position().as_millis(),
       !radio.player.is_paused(),
       app,
-    ));
+    );
+    snapshot.is_live = true;
+    return Some(snapshot);
   }
 
   None
@@ -290,6 +295,7 @@ fn source_snapshot(
     source: PlaybackSource::ExternalDevice,
     progress_ms,
     is_playing,
+    is_live: false,
     shuffle: app.user_config.behavior.shuffle_enabled,
     repeat: None,
   }
@@ -619,6 +625,7 @@ mod tests {
     );
     assert_eq!(snapshot.metadata.duration_ms, 181_000);
     assert!(snapshot.shuffle);
+    assert!(!snapshot.is_live);
   }
 
   #[test]
