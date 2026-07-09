@@ -1797,11 +1797,12 @@ mod tests {
   #[cfg(feature = "cover-art")]
   #[test]
   fn cover_playbar_progress_reclaims_the_row_below_the_cover() {
+    let behavior = crate::core::user_config::UserConfig::new().behavior;
     let inner = Rect::new(1, 3, 49, 4);
     let text_area = Rect::new(10, 3, 40, 4);
     let image_area = Rect::new(1, 3, 6, 3);
     let (artist_area, controls_area, progress_area) =
-      split_cover_playbar_rows(inner, text_area, image_area);
+      split_cover_playbar_rows(inner, text_area, image_area, &behavior);
 
     assert_eq!(artist_area, Rect::new(10, 3, 40, 2));
     assert_eq!(controls_area, Rect::new(10, 3, 40, 0));
@@ -1811,11 +1812,12 @@ mod tests {
   #[cfg(feature = "cover-art")]
   #[test]
   fn cover_playbar_progress_stays_beside_a_full_height_cover() {
+    let behavior = crate::core::user_config::UserConfig::new().behavior;
     let inner = Rect::new(1, 3, 49, 4);
     let text_area = Rect::new(10, 3, 40, 4);
     let image_area = Rect::new(1, 3, 8, 4);
     let (artist_area, controls_area, progress_area) =
-      split_cover_playbar_rows(inner, text_area, image_area);
+      split_cover_playbar_rows(inner, text_area, image_area, &behavior);
 
     assert_eq!(artist_area, Rect::new(10, 3, 40, 2));
     assert_eq!(controls_area, Rect::new(10, 3, 40, 0));
@@ -1825,11 +1827,12 @@ mod tests {
   #[cfg(feature = "cover-art")]
   #[test]
   fn cover_playbar_rows_reserve_full_width_controls_below_the_cover() {
+    let behavior = crate::core::user_config::UserConfig::new().behavior;
     let inner = Rect::new(1, 3, 109, 6);
     let text_area = Rect::new(14, 3, 96, 6);
     let image_area = Rect::new(1, 3, 10, 4);
     let (artist_area, controls_area, progress_area) =
-      split_cover_playbar_rows(inner, text_area, image_area);
+      split_cover_playbar_rows(inner, text_area, image_area, &behavior);
 
     assert_eq!(artist_area, Rect::new(14, 3, 96, 2));
     assert_eq!(controls_area, Rect::new(1, 7, 109, 1));
